@@ -1,5 +1,5 @@
 {
-  description = "Akimi - fast ext4 disk usage scanner";
+  description = "Akimi - fast Linux filesystem disk usage scanner";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -14,6 +14,7 @@
           default = pkgs.mkShell {
             nativeBuildInputs = with pkgs; [
               cargo
+              btrfs-progs
               clang
               clippy
               cmake
