@@ -1,6 +1,7 @@
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,7 @@ use akimi_ext4::{FilesystemInfo, FilesystemScan};
 use thiserror::Error;
 
 mod direct;
+mod naive;
 
 #[derive(Debug, Error)]
 pub enum BtrfsError {
@@ -44,7 +46,7 @@ pub struct BtrfsFilesystem {
 
 impl BtrfsFilesystem {
     pub(crate) fn is_btrfs_path(path: &Path) -> bool {
-        is_btrfs(path)
+        is_btrfs(path) || is_btrfs_source(path)
     }
 
     pub fn open(root: &Path) -> Result<Self, BtrfsError> {
@@ -53,7 +55,10 @@ impl BtrfsFilesystem {
             path: root.to_path_buf(),
             source,
         })?;
-        if !metadata.is_dir() || !is_btrfs(root) {
+        if metadata.is_dir() && !is_btrfs(root) {
+            return Err(BtrfsError::RequiresMountedDirectory(root.to_path_buf()));
+        }
+        if !metadata.is_dir() && !is_btrfs_source(root) {
             return Err(BtrfsError::RequiresMountedDirectory(root.to_path_buf()));
         }
 
@@ -62,7 +67,11 @@ impl BtrfsFilesystem {
             info: FilesystemInfo {
                 device: root.to_path_buf(),
                 filesystem_type: "btrfs",
-                block_size: metadata.blksize().max(1) as u32,
+                block_size: if metadata.is_dir() {
+                    metadata.blksize().max(1) as u32
+                } else {
+                    4096
+                },
                 inode_count: 0,
                 reported_allocated_inodes: 0,
                 feature_compat: 0,
@@ -80,7 +89,12 @@ impl BtrfsFilesystem {
     }
 
     pub fn scan_with_threads(&mut self, _threads: usize) -> Result<FilesystemScan, BtrfsError> {
-        direct::scan(&self.root, &mut self.info, self.open_time)
+        if std::env::var_os("AKIMI_BTRFS_SCANNER").as_deref() == Some(std::ffi::OsStr::new("naive"))
+        {
+            naive::scan(&self.root, &mut self.info, self.open_time)
+        } else {
+            direct::scan(&self.root, &mut self.info, self.open_time)
+        }
     }
 }
 
@@ -94,4 +108,21 @@ fn is_btrfs(path: &Path) -> bool {
     // path is a valid NUL-terminated C string owned by this function.
     let result = unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) };
     result == 0 && unsafe { stats.assume_init() }.f_type as u64 == 0x9123_683e
+}
+
+fn is_btrfs_source(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() && !metadata.file_type().is_block_device() {
+        return false;
+    }
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    if file.seek(SeekFrom::Start(0x10040)).is_err() {
+        return false;
+    }
+    let mut magic = [0u8; 8];
+    file.read_exact(&mut magic).is_ok() && magic == *b"_BHRfS_M"
 }

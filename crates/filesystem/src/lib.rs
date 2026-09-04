@@ -43,6 +43,9 @@ impl Filesystem {
                 path: path.to_path_buf(),
             });
         }
+        if BtrfsFilesystem::is_btrfs_path(path) {
+            return Ok(Self::Btrfs(BtrfsFilesystem::open(path)?));
+        }
         Ok(Self::Ext4(Ext4Filesystem::open(path)?))
     }
 
