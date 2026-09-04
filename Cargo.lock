@@ -137,6 +137,7 @@ name = "akimi"
 version = "0.1.0"
 dependencies = [
  "akimi-ext4",
+ "akimi-filesystem",
  "akimi-model",
  "anyhow",
  "clap",
@@ -154,10 +155,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "akimi-filesystem"
+version = "0.1.0"
+dependencies = [
+ "akimi-ext4",
+ "akimi-model",
+ "libc",
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "akimi-gui"
 version = "0.1.0"
 dependencies = [
  "akimi-ext4",
+ "akimi-filesystem",
  "akimi-model",
  "gpui-kit",
  "trash",

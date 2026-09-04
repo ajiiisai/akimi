@@ -73,6 +73,7 @@ pub struct FilesystemInfo {
     pub feature_compat: u32,
     pub feature_incompat: u32,
     pub feature_ro_compat: u32,
+    pub size_accounting: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -219,6 +220,7 @@ impl Ext4Filesystem {
             feature_compat: raw_info.feature_compat,
             feature_incompat: raw_info.feature_incompat,
             feature_ro_compat: raw_info.feature_ro_compat,
+            size_accounting: "allocated blocks",
         };
         Ok(Self {
             native,

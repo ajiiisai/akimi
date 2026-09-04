@@ -1,0 +1,11 @@
+[package]
+name = "akimi-filesystem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+akimi-ext4 = { path = "../ext4" }
+akimi-model = { path = "../model" }
+libc = "0.2"
+thiserror.workspace = true
