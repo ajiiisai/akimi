@@ -1,6 +1,6 @@
 # Akimi
 
-Akimi is a disk usage analyzer for Linux ext4 filesystems. It reads filesystem metadata directly through `libext2fs`, avoiding a conventional path-by-path directory walk.
+Akimi is a disk usage analyzer for Linux filesystems. It reads ext4 metadata directly through `libext2fs` and has a path-based btrfs proof of concept.
 
 The name Akimi (空き見) plays on 空き (aki), meaning free or unused space, and 見 (mi), meaning seeing or looking. Put together, it’s roughly “looking at free space.”
 
@@ -39,13 +39,13 @@ The resulting executables are `target/release/akimi-gui` and `target/release/aki
 
 ### Graphical interface
 
-Start the application and select an ext4 volume:
+Start the application and select a mounted Linux volume:
 
 ```bash
 ./target/release/akimi-gui
 ```
 
-You can also open a device or filesystem image directly:
+You can also open an ext4 device or filesystem image directly:
 
 ```bash
 ./target/release/akimi-gui /dev/nvme0n1p2
@@ -55,7 +55,7 @@ When a block device is not readable by the current user, the GUI requests tempor
 
 ### Command line
 
-Scan a block device:
+Scan an ext4 block device or a mounted btrfs directory:
 
 ```bash
 sudo ./target/release/akimi /dev/nvme0n1p2
@@ -65,6 +65,9 @@ Regular filesystem images do not normally require elevated permissions:
 
 ```bash
 ./target/release/akimi disk.img
+
+# btrfs proof of concept
+./target/release/akimi /mnt/data
 ```
 
 Useful options include:
@@ -85,10 +88,11 @@ Rankings use allocated size because it represents physical disk usage. Sparse fi
 
 ## Limitations
 
-- Linux and ext4 only; ext2 and ext3 are rejected.
+- Linux only. The btrfs proof of concept accepts mounted btrfs directories; raw btrfs devices and images are not supported yet.
+- Ext4 devices and images still use the direct metadata scanner.
 - Mounted filesystems can change during a scan, causing small inconsistencies.
 - Filesystem metadata, journals, and reserved blocks are not attributed to file-tree entries.
-- Akimi has no fallback directory walker.
+- Btrfs currently uses a serial directory walker and approximate allocated-size accounting.
 
 ## Development
 
