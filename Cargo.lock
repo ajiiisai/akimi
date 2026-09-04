@@ -145,12 +145,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "akimi-btrfs-helper"
+version = "0.1.0"
+dependencies = [
+ "akimi-filesystem",
+ "clap",
+ "serde_json",
+]
+
+[[package]]
 name = "akimi-ext4"
 version = "0.1.0"
 dependencies = [
  "akimi-model",
  "cc",
  "pkg-config",
+ "serde",
  "thiserror 2.0.20",
 ]
 
@@ -173,6 +183,7 @@ dependencies = [
  "akimi-filesystem",
  "akimi-model",
  "gpui-kit",
+ "serde_json",
  "trash",
  "zbus",
 ]
@@ -180,6 +191,9 @@ dependencies = [
 [[package]]
 name = "akimi-model"
 version = "0.1.0"
+dependencies = [
+ "serde",
+]
 
 [[package]]
 name = "aligned"

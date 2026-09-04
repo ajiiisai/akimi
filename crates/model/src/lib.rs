@@ -8,7 +8,7 @@ pub use arena::{ArenaError, NameArena, NodeArena};
 pub use node::{NameRef, Node, NodeId, NodeKind};
 pub use rank::{rank_largest, RankFilter, RankedNode};
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ScanResult {
     pub arena: NodeArena,
     pub totals: Vec<Totals>,

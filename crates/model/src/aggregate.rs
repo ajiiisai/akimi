@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::{Node, NodeId, NodeKind};
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Totals {
     pub self_allocated: u64,
     pub recursive_allocated: u64,

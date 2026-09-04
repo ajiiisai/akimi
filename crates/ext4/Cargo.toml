@@ -10,9 +10,9 @@ name = "akimi_ext4"
 
 [dependencies]
 akimi-model = { path = "../model" }
+serde.workspace = true
 thiserror.workspace = true
 
 [build-dependencies]
 cc = "1.2"
 pkg-config = "0.3"
-

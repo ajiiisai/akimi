@@ -178,9 +178,13 @@ impl Akimi {
                 .and_then(|path| fs::metadata(path).ok())
                 .map(|metadata| metadata.dev());
             let mut filesystem = device_access::open_for_scan(&scan_path)?;
-            let scan = filesystem
-                .scan_with_threads(workers)
-                .map_err(|error| error.to_string())?;
+            let scan = match filesystem.scan_with_threads(workers) {
+                Ok(scan) => scan,
+                Err(error) if filesystem.is_btrfs() && error.is_permission_denied() => {
+                    device_access::scan_btrfs_with_helper(&scan_path)?
+                }
+                Err(error) => return Err(error.to_string()),
+            };
             let scan = Arc::new(scan);
             // Build the initial root layout off the UI thread. Zoomed subtree
             // layouts are built on demand and cached; window resizing only

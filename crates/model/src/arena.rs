@@ -23,7 +23,7 @@ impl fmt::Display for ArenaError {
 
 impl Error for ArenaError {}
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct NameArena {
     bytes: Vec<u8>,
 }
@@ -85,7 +85,7 @@ impl NameArena {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct NodeArena {
     nodes: Vec<Node>,
     names: NameArena,

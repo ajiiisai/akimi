@@ -3,7 +3,9 @@ use std::fs::File;
 use std::os::fd::OwnedFd as StdOwnedFd;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
+use std::process::Command;
 
+use akimi_ext4::FilesystemScan;
 use akimi_filesystem::Filesystem;
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{OwnedFd, OwnedObjectPath, Value};
@@ -25,6 +27,33 @@ pub(crate) fn open_for_scan(device: &Path) -> Result<Filesystem, String> {
         }
         Err(error) => Err(error.to_string()),
     }
+}
+
+pub(crate) fn scan_btrfs_with_helper(device: &Path) -> Result<FilesystemScan, String> {
+    let helper = std::env::var_os("AKIMI_BTRFS_HELPER")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()?
+                .parent()
+                .map(|path| path.join("akimi-btrfs-helper"))
+        })
+        .ok_or_else(|| "could not locate the btrfs privilege helper".to_string())?;
+    let output = Command::new("pkexec")
+        .arg(helper)
+        .arg(device)
+        .output()
+        .map_err(|error| format!("could not start the btrfs privilege helper: {error}"))?;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if message.is_empty() {
+            format!("btrfs authorization failed ({})", output.status)
+        } else {
+            message
+        });
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("btrfs helper returned invalid scan data: {error}"))
 }
 
 fn is_block_device(path: &Path) -> bool {

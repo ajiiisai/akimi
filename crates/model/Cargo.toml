@@ -7,3 +7,5 @@ license.workspace = true
 [lib]
 name = "akimi_model"
 
+[dependencies]
+serde.workspace = true
