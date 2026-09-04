@@ -53,7 +53,7 @@ use ui::{
     MODIFIED_WIDTH as MODIFIED_W, PERCENT_WIDTH as PERCENT_W, ROW_HEIGHT as ROW_H,
     SHARE_WIDTH as SHARE_W, SIZE_WIDTH as SIZE_W,
 };
-use volumes::{discover as detect_ext4_volumes, Volume};
+use volumes::{discover as detect_volumes, Volume};
 
 struct ReadyState {
     device: PathBuf,
@@ -144,7 +144,7 @@ struct Akimi {
 impl Akimi {
     fn new() -> Self {
         Self {
-            volumes: detect_ext4_volumes(),
+            volumes: detect_volumes(),
             selected_volume: 0,
             stage: Stage::Picker,
             map_bounds: Rc::new(Cell::new(Bounds::default())),
@@ -160,6 +160,7 @@ impl Akimi {
         };
         let device = volume.device.clone();
         let mount_point = volume.mount_point.clone();
+        let scan_path = volume.scan_path.clone().unwrap_or_else(|| device.clone());
         self.delete_confirmation = None;
         self.stage = Stage::Scanning {
             device: device.clone(),
@@ -175,7 +176,7 @@ impl Akimi {
                 .as_ref()
                 .and_then(|path| fs::metadata(path).ok())
                 .map(|metadata| metadata.dev());
-            let mut filesystem = device_access::open_for_scan(&device)?;
+            let mut filesystem = device_access::open_for_scan(&scan_path)?;
             let scan = filesystem
                 .scan_with_threads(workers)
                 .map_err(|error| error.to_string())?;
@@ -298,6 +299,19 @@ impl Akimi {
             name,
             is_directory: node.kind == NodeKind::Directory,
         })
+    }
+
+    fn explorer_path(&self, id: NodeId) -> Option<PathBuf> {
+        let Stage::Ready(ready) = &self.stage else {
+            return None;
+        };
+        let mount_point = ready.mount_point.clone()?;
+        if id == NodeId::ROOT {
+            return Some(mount_point);
+        }
+        let path = ready.scan.result.arena.path_bytes(id);
+        let relative_path = path.strip_prefix(b"/")?;
+        Some(mount_point.join(PathBuf::from(OsString::from_vec(relative_path.to_vec()))))
     }
 
     fn request_permanent_delete(&mut self, selection: DeleteSelection, cx: &mut Context<Self>) {
@@ -505,8 +519,8 @@ impl Akimi {
     fn render_picker(&self, cx: &mut Context<Self>) -> Div {
         let has_volumes = !self.volumes.is_empty();
         let table = cx.theme().table;
-        let selected_bg = cx.theme().danger.opacity(0.1);
-        let selected_edge = cx.theme().danger;
+        let selected_bg = cx.theme().primary.opacity(0.1);
+        let selected_edge = cx.theme().primary;
         let table_hover = cx.theme().table_hover;
         let row_border = cx.theme().table_row_border.opacity(0.55);
         let foreground = cx.theme().foreground;
@@ -530,7 +544,7 @@ impl Akimi {
                     .unwrap_or_else(|| "not mounted".to_string());
                 div()
                     .id(("volume", index))
-                    .h(px(56.0))
+                    .h(px(68.0))
                     .flex()
                     .items_center()
                     .border_b_1()
@@ -561,7 +575,7 @@ impl Akimi {
                         div()
                             .ml_3()
                             .flex_none()
-                            .size_8()
+                            .size_10()
                             .flex()
                             .items_center()
                             .justify_center()
@@ -569,7 +583,7 @@ impl Akimi {
                             .bg(cx.theme().muted.opacity(0.55))
                             .child(
                                 Icon::new(IconName::HardDrive)
-                                    .small()
+                                    .text_lg()
                                     .text_color(if selected { selected_edge } else { muted }),
                             ),
                     )
@@ -614,7 +628,7 @@ impl Akimi {
                             .bg(cx.theme().muted.opacity(0.55))
                             .text_xs()
                             .text_color(muted)
-                            .child("ext4"),
+                            .child(volume.filesystem.clone()),
                     )
             })
             .collect::<Vec<_>>();
@@ -629,9 +643,9 @@ impl Akimi {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(760.0))
+                    .max_w(px(880.0))
                     .max_h(relative(0.82))
-                    .min_h(px(280.0))
+                    .min_h(px(360.0))
                     .flex()
                     .flex_col()
                     .overflow_hidden()
@@ -643,7 +657,7 @@ impl Akimi {
                     .child(
                         div()
                             .flex_none()
-                            .min_h(px(76.0))
+                            .min_h(px(88.0))
                             .px_4()
                             .flex()
                             .items_center()
@@ -653,7 +667,7 @@ impl Akimi {
                             .child(
                                 div()
                                     .flex_none()
-                                    .size_9()
+                                    .size_10()
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -680,9 +694,9 @@ impl Akimi {
                                     )
                                     .child(
                                         div()
-                                            .text_xs()
+                                            .text_sm()
                                             .text_color(muted)
-                                            .child("Select an ext4 filesystem to analyze."),
+                                            .child("Select a mounted volume to analyze."),
                                     ),
                             ),
                     )
@@ -704,7 +718,7 @@ impl Akimi {
                                         .text_sm()
                                         .text_color(muted)
                                         .child(
-                                            "No mounted ext4 volumes were found. You can also pass an image or block device as the first argument.",
+                                        "No mounted supported Linux filesystems were found. You can also pass an image or block device as the first argument.",
                                         ),
                                 )
                             }),
