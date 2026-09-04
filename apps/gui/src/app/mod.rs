@@ -5,6 +5,7 @@ use std::ops::Range;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1109,6 +1110,7 @@ impl Akimi {
         };
         let name_tooltip = name.clone();
         let delete_selection = self.delete_selection(id);
+        let explorer_path = self.explorer_path(id);
         let delete_disabled = self.deletion.is_some();
         let owner = cx.weak_entity();
 
@@ -1201,8 +1203,9 @@ impl Akimi {
                 .child(num_cell(subdirs, FOLDERS_W, muted, cx))
                 .child(num_cell(modified, MODIFIED_W, muted, cx))
                 .context_menu(move |menu, _, cx| {
-                    delete_context_menu(
+                    filesystem_context_menu(
                         menu,
+                        explorer_path.clone(),
                         delete_selection.clone(),
                         owner.clone(),
                         delete_disabled,
@@ -1531,8 +1534,15 @@ impl Akimi {
                         (selection, this.deletion.is_some())
                     })
                     .unwrap_or((None, true));
-                delete_context_menu(
+                let explorer_path = menu_owner
+                    .read_with(cx, |this, _| match &this.stage {
+                        Stage::Ready(ready) => this.explorer_path(ready.selected),
+                        _ => None,
+                    })
+                    .unwrap_or(None);
+                filesystem_context_menu(
                     menu,
+                    explorer_path,
                     selection,
                     menu_owner.clone(),
                     disabled,
@@ -1678,19 +1688,51 @@ impl Render for Akimi {
     }
 }
 
-fn delete_context_menu(
+fn filesystem_context_menu(
     menu: PopupMenu,
+    explorer_path: Option<PathBuf>,
     selection: Option<DeleteSelection>,
     owner: WeakEntity<Akimi>,
     busy: bool,
     danger: Hsla,
 ) -> PopupMenu {
     let disabled = busy || selection.is_none();
+    let open_disabled = busy || explorer_path.is_none();
+    let open_owner = owner.clone();
     let trash_selection = selection.clone();
     let trash_owner = owner.clone();
     let permanent_selection = selection;
 
     menu.item(
+        PopupMenuItem::new("Open in File Explorer")
+            .icon(IconName::FolderOpen)
+            .disabled(open_disabled)
+            .on_click(move |_, window, cx| {
+                let Some(path) = explorer_path.clone() else {
+                    return;
+                };
+                let open_path = match fs::symlink_metadata(&path) {
+                    Ok(metadata) if metadata.is_dir() => path.clone(),
+                    _ => path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_else(|| path.clone()),
+                };
+                if let Err(error) = Command::new("xdg-open").arg(&open_path).spawn() {
+                    let _ = open_owner.update(cx, |_, cx| {
+                        window.push_notification(
+                            Notification::error(format!(
+                                "Could not open {}: {error}",
+                                open_path.display()
+                            )),
+                            cx,
+                        );
+                    });
+                }
+            }),
+    )
+    .item(PopupMenuItem::separator())
+    .item(
         PopupMenuItem::new("Delete")
             .icon(IconName::Delete)
             .disabled(disabled)
