@@ -1,6 +1,7 @@
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
+use std::fs::OpenOptions;
 use std::os::fd::AsRawFd;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -112,10 +113,14 @@ fn scan_inner(
     info: &mut FilesystemInfo,
     open_time: Duration,
 ) -> Result<FilesystemScan, DirectError> {
-    let file = File::open(root).map_err(|source| DirectError::Open {
-        path: root.to_path_buf(),
-        source,
-    })?;
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_DIRECTORY)
+        .open(root)
+        .map_err(|source| DirectError::Open {
+            path: root.to_path_buf(),
+            source,
+        })?;
     let search_started = Instant::now();
     let (inodes, entries) = search_tree(file.as_raw_fd())?;
     let inode_scan = search_started.elapsed();
