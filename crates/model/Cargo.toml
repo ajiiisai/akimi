@@ -1,0 +1,9 @@
+[package]
+name = "akimi-model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "akimi_model"
+

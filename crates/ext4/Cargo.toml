@@ -1,0 +1,18 @@
+[package]
+name = "akimi-ext4"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+build = "build.rs"
+
+[lib]
+name = "akimi_ext4"
+
+[dependencies]
+akimi-model = { path = "../model" }
+thiserror.workspace = true
+
+[build-dependencies]
+cc = "1.2"
+pkg-config = "0.3"
+

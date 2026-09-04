@@ -1,0 +1,31 @@
+[workspace]
+members = ["apps/cli", "apps/gui", "crates/ext4", "crates/model"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+gpui-kit = "0.6.0"
+serde_json = "1.0"
+thiserror = "2.0"
+trash = "5.2.7"
+zbus = "5.19.0"
+
+[profile.dev]
+# Keep local code debuggable while avoiding the worst opt-level 0 slowdowns.
+opt-level = 1
+
+[profile.dev.package."*"]
+# GPUI and the graphics stack rarely change during normal Akimi development.
+opt-level = 3
+
+[profile.release]
+# Prefer runtime speed over release link time.
+opt-level = 3
+lto = "fat"
+codegen-units = 1

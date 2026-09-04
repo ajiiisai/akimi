@@ -1,0 +1,16 @@
+[package]
+name = "akimi-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "akimi-gui"
+path = "src/main.rs"
+
+[dependencies]
+akimi-ext4 = { path = "../../crates/ext4" }
+akimi-model = { path = "../../crates/model" }
+gpui-kit.workspace = true
+trash.workspace = true
+zbus.workspace = true
