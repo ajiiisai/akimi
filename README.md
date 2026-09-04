@@ -1,6 +1,6 @@
 # Akimi
 
-Akimi is a disk usage analyzer for Linux filesystems. It reads ext4 metadata directly through `libext2fs` and has a path-based btrfs proof of concept.
+Akimi is a disk usage analyzer for Linux filesystems. It reads ext4 metadata directly through `libext2fs` and btrfs metadata through the kernel tree-search ioctl.
 
 The name Akimi (空き見) plays on 空き (aki), meaning free or unused space, and 見 (mi), meaning seeing or looking. Put together, it’s roughly “looking at free space.”
 
@@ -92,7 +92,15 @@ Rankings use allocated size because it represents physical disk usage. Sparse fi
 - Ext4 devices and images still use the direct metadata scanner.
 - Mounted filesystems can change during a scan, causing small inconsistencies.
 - Filesystem metadata, journals, and reserved blocks are not attributed to file-tree entries.
-- Btrfs currently uses a serial directory walker and approximate allocated-size accounting.
+- Btrfs uses direct batched metadata queries and approximate allocated-size accounting.
+
+To create a temporary btrfs volume and benchmark the scanner, run:
+
+```bash
+./scripts/benchmark-btrfs.sh
+```
+
+The script requires `sudo`, `btrfs-progs`, and a Linux kernel with btrfs support. Set `AKIMI_BTRFS_FILES` to change the number of generated files.
 
 ## Development
 
