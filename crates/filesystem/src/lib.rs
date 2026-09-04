@@ -34,6 +34,10 @@ pub enum Filesystem {
 }
 
 impl Filesystem {
+    pub fn is_btrfs(&self) -> bool {
+        matches!(self, Self::Btrfs(_))
+    }
+
     pub fn open(path: &Path) -> Result<Self, FilesystemError> {
         if path.is_dir() {
             if BtrfsFilesystem::is_btrfs_path(path) {
