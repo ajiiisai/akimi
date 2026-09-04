@@ -3,20 +3,17 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use akimi_ext4::{Ext4Error, Ext4Filesystem, FilesystemInfo, FilesystemScan};
+use akimi_ext4::{FilesystemInfo, FilesystemScan};
+use akimi_filesystem::{Filesystem, FilesystemError};
 use akimi_model::{rank_largest, NodeKind, RankFilter, RankedNode};
 use anyhow::Result;
 use clap::Parser;
 use serde_json::json;
 
 #[derive(Debug, Parser)]
-#[command(
-    name = "akimi",
-    version,
-    about = "Scan ext4 disk usage from filesystem metadata"
-)]
+#[command(name = "akimi", version, about = "Scan Linux filesystem disk usage")]
 struct Arguments {
-    /// An ext4 block device or filesystem image.
+    /// A mounted filesystem directory, block device, or filesystem image.
     device: PathBuf,
 
     /// Number of entries to display.
@@ -46,8 +43,8 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("error: {error:#}");
             if error
-                .downcast_ref::<Ext4Error>()
-                .is_some_and(Ext4Error::is_permission_denied)
+                .downcast_ref::<FilesystemError>()
+                .is_some_and(FilesystemError::is_permission_denied)
             {
                 eprintln!("\nTry running Akimi with sudo.");
             }
@@ -63,13 +60,13 @@ fn run(arguments: Arguments) -> Result<()> {
         println!("Scanning {}...\n", arguments.device.display());
     }
 
-    let mut filesystem = Ext4Filesystem::open(&arguments.device)?;
-    let info = filesystem.info().clone();
+    let mut filesystem = Filesystem::open(&arguments.device)?;
     let threads = arguments
         .threads
         .map(NonZeroUsize::get)
         .unwrap_or_else(default_thread_count);
     let scan = filesystem.scan_with_threads(threads)?;
+    let info = filesystem.info().clone();
 
     let filter = match (arguments.files, arguments.dirs) {
         (true, true) => RankFilter::DirectoriesAndFiles,
@@ -118,6 +115,7 @@ fn print_text(
         "  features:             compat={:#010x} incompat={:#010x} ro={:#010x}\n",
         info.feature_compat, info.feature_incompat, info.feature_ro_compat
     );
+    println!("  size accounting:      {}\n", info.size_accounting);
 
     println!("Objects");
     println!(
@@ -240,6 +238,7 @@ fn print_json(
             "feature_compat": info.feature_compat,
             "feature_incompat": info.feature_incompat,
             "feature_ro_compat": info.feature_ro_compat,
+            "size_accounting": info.size_accounting,
         },
         "stats": {
             "scan_workers": scan.workers,

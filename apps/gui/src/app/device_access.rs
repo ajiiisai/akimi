@@ -4,7 +4,7 @@ use std::os::fd::OwnedFd as StdOwnedFd;
 use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 
-use akimi_ext4::Ext4Filesystem;
+use akimi_filesystem::Filesystem;
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{OwnedFd, OwnedObjectPath, Value};
 
@@ -16,12 +16,12 @@ const UDISKS_BLOCK_INTERFACE: &str = "org.freedesktop.UDisks2.Block";
 /// Opens a volume without broadening the user's permissions. A normal open is
 /// attempted first. If the kernel denies it, UDisks asks polkit for one
 /// read-only descriptor whose lifetime is limited to this scan.
-pub(crate) fn open_for_scan(device: &Path) -> Result<Ext4Filesystem, String> {
-    match Ext4Filesystem::open(device) {
+pub(crate) fn open_for_scan(device: &Path) -> Result<Filesystem, String> {
+    match Filesystem::open(device) {
         Ok(filesystem) => Ok(filesystem),
         Err(error) if error.is_permission_denied() && is_block_device(device) => {
             let descriptor = request_read_descriptor(device)?;
-            Ext4Filesystem::open_descriptor(device, descriptor).map_err(|error| error.to_string())
+            Filesystem::open_descriptor(device, descriptor).map_err(|error| error.to_string())
         }
         Err(error) => Err(error.to_string()),
     }

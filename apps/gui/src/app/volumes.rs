@@ -7,41 +7,49 @@ use std::path::PathBuf;
 pub(crate) struct Volume {
     pub(crate) device: PathBuf,
     pub(crate) mount_point: Option<PathBuf>,
+    pub(crate) scan_path: Option<PathBuf>,
+    pub(crate) filesystem: String,
 }
 
 pub(crate) fn discover() -> Vec<Volume> {
     let mut volumes = Vec::new();
-    let mut devices = HashSet::new();
+    let mut mounts = HashSet::new();
 
-    if let Ok(mounts) = fs::read_to_string("/proc/self/mounts") {
-        for line in mounts.lines() {
+    if let Ok(mount_table) = fs::read_to_string("/proc/self/mounts") {
+        for line in mount_table.lines() {
             let mut fields = line.split_whitespace();
             let (Some(device), Some(mount_point), Some(filesystem)) =
                 (fields.next(), fields.next(), fields.next())
             else {
                 continue;
             };
-            if filesystem != "ext4" {
+            if !matches!(filesystem, "ext4" | "btrfs") {
                 continue;
             }
 
             let device = PathBuf::from(decode_mount_field(device));
-            if devices.insert(device.clone()) {
+            let mount_point = PathBuf::from(decode_mount_field(mount_point));
+            if mounts.insert((device.clone(), mount_point.clone())) {
+                let scan_path = (filesystem == "btrfs").then(|| mount_point.clone());
                 volumes.push(Volume {
                     device,
-                    mount_point: Some(PathBuf::from(decode_mount_field(mount_point))),
+                    mount_point: Some(mount_point),
+                    scan_path,
+                    filesystem: filesystem.to_owned(),
                 });
             }
         }
     }
 
     if let Some(argument) = env::args_os().nth(1).map(PathBuf::from) {
-        if devices.insert(argument.clone()) {
+        if !volumes.iter().any(|volume| volume.device == argument) {
             volumes.insert(
                 0,
                 Volume {
                     device: argument,
                     mount_point: None,
+                    scan_path: None,
+                    filesystem: "unknown".to_owned(),
                 },
             );
         }
