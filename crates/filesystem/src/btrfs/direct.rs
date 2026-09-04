@@ -16,7 +16,9 @@ const DIR_ITEM_KEY: u32 = 84;
 const DIR_INDEX_KEY: u32 = 96;
 const SEARCH_BUFFER_SIZE: usize = 1024 * 1024;
 const SEARCH_HEADER_SIZE: usize = 32;
-const INODE_ITEM_SIZE: usize = 176;
+// btrfs_timespec is packed as an 8-byte seconds field followed by a
+// 4-byte nanoseconds field, so btrfs_inode_item is 160 bytes on disk.
+const INODE_ITEM_SIZE: usize = 160;
 const DIR_ITEM_SIZE: usize = 30;
 const FILE_TYPE_MASK: u32 = 0o170000;
 const FILE_TYPE_REGULAR: u32 = 0o100000;
@@ -36,8 +38,8 @@ pub enum DirectError {
     },
     #[error("btrfs tree search failed: {0}")]
     Io(#[source] std::io::Error),
-    #[error("invalid btrfs tree item")]
-    InvalidItem,
+    #[error("invalid btrfs tree item ({context})")]
+    InvalidItem { context: String },
     #[error(transparent)]
     Arena(#[from] akimi_model::ArenaError),
     #[error(transparent)]
@@ -122,9 +124,11 @@ fn scan_inner(
     let root_meta = inodes
         .get(&BTRFS_FIRST_FREE_OBJECTID)
         .copied()
-        .ok_or(DirectError::InvalidItem)?;
+        .ok_or_else(|| DirectError::InvalidItem {
+            context: "missing root inode".to_string(),
+        })?;
     if root_meta.kind != NodeKind::Directory {
-        return Err(DirectError::InvalidItem);
+        return Err(invalid_item("root inode is not a directory", 0, None, None));
     }
 
     let mut nodes = vec![Node {
@@ -257,7 +261,7 @@ fn search_tree(fd: i32) -> Result<(HashMap<u64, InodeMeta>, Vec<DirectoryEntry>)
         let mut last = None;
         for _ in 0..count {
             if cursor + SEARCH_HEADER_SIZE > buffer.len() {
-                return Err(DirectError::InvalidItem);
+                return Err(invalid_item("search header", cursor, None, None));
             }
             let objectid = read_u64(buffer, cursor + 8)?;
             let offset = read_u64(buffer, cursor + 16)?;
@@ -265,7 +269,12 @@ fn search_tree(fd: i32) -> Result<(HashMap<u64, InodeMeta>, Vec<DirectoryEntry>)
             let length = read_u32(buffer, cursor + 28)? as usize;
             cursor += SEARCH_HEADER_SIZE;
             if cursor + length > buffer.len() {
-                return Err(DirectError::InvalidItem);
+                return Err(invalid_item(
+                    "item payload",
+                    cursor,
+                    Some(item_type),
+                    Some(length),
+                ));
             }
             let item = &buffer[cursor..cursor + length];
             match item_type {
@@ -284,7 +293,11 @@ fn search_tree(fd: i32) -> Result<(HashMap<u64, InodeMeta>, Vec<DirectoryEntry>)
         };
         key.min_objectid = objectid;
         key.min_type = item_type;
-        key.min_offset = offset.checked_add(1).ok_or(DirectError::InvalidItem)?;
+        key.min_offset = offset
+            .checked_add(1)
+            .ok_or_else(|| DirectError::InvalidItem {
+                context: "search key offset overflow".to_string(),
+            })?;
     }
     Ok((inodes, entries))
 }
@@ -295,7 +308,7 @@ fn parse_inode(
     inodes: &mut HashMap<u64, InodeMeta>,
 ) -> Result<(), DirectError> {
     if item.len() < INODE_ITEM_SIZE {
-        return Err(DirectError::InvalidItem);
+        return Err(invalid_item("inode payload", 0, None, Some(item.len())));
     }
     let mode = read_u32(item, 52)?;
     let kind = match mode & FILE_TYPE_MASK {
@@ -312,7 +325,7 @@ fn parse_inode(
             logical_size: read_u64(item, 16)?,
             allocated_size: read_u64(item, 24)?,
             links: read_u32(item, 40)?,
-            mtime: read_i64(item, 144)?,
+            mtime: read_i64(item, 136)?,
         },
     );
     Ok(())
@@ -325,7 +338,7 @@ fn parse_directory_items(
 ) -> Result<(), DirectError> {
     while !item.is_empty() {
         if item.len() < DIR_ITEM_SIZE {
-            return Err(DirectError::InvalidItem);
+            return Err(invalid_item("directory payload", 0, None, Some(item.len())));
         }
         let child = read_u64(item, 0)?;
         let data_len = read_u16(item, 25)? as usize;
@@ -333,9 +346,9 @@ fn parse_directory_items(
         let length = DIR_ITEM_SIZE
             .checked_add(data_len)
             .and_then(|length| length.checked_add(name_len))
-            .ok_or(DirectError::InvalidItem)?;
+            .ok_or_else(|| invalid_item("directory item length overflow", 0, None, None))?;
         if length > item.len() {
-            return Err(DirectError::InvalidItem);
+            return Err(invalid_item("directory item length", 0, None, Some(length)));
         }
         entries.push(DirectoryEntry {
             parent,
@@ -350,21 +363,21 @@ fn parse_directory_items(
 fn read_u16(bytes: &[u8], offset: usize) -> Result<u16, DirectError> {
     let bytes = bytes
         .get(offset..offset + 2)
-        .ok_or(DirectError::InvalidItem)?;
+        .ok_or_else(|| invalid_item("u16 field", offset, None, None))?;
     Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
 }
 
 fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, DirectError> {
     let bytes = bytes
         .get(offset..offset + 4)
-        .ok_or(DirectError::InvalidItem)?;
+        .ok_or_else(|| invalid_item("u32 field", offset, None, None))?;
     Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
 }
 
 fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, DirectError> {
     let bytes = bytes
         .get(offset..offset + 8)
-        .ok_or(DirectError::InvalidItem)?;
+        .ok_or_else(|| invalid_item("u64 field", offset, None, None))?;
     Ok(u64::from_le_bytes([
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ]))
@@ -372,4 +385,19 @@ fn read_u64(bytes: &[u8], offset: usize) -> Result<u64, DirectError> {
 
 fn read_i64(bytes: &[u8], offset: usize) -> Result<i64, DirectError> {
     Ok(read_u64(bytes, offset)? as i64)
+}
+
+fn invalid_item(
+    context: &str,
+    cursor: usize,
+    item_type: Option<u32>,
+    length: Option<usize>,
+) -> DirectError {
+    DirectError::InvalidItem {
+        context: format!(
+            "{context}, cursor={cursor}, type={}, length={}",
+            item_type.map_or_else(|| "?".to_string(), |value| value.to_string()),
+            length.map_or_else(|| "?".to_string(), |value| value.to_string()),
+        ),
+    }
 }
