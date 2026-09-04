@@ -9,3 +9,6 @@ akimi-ext4 = { path = "../ext4" }
 akimi-model = { path = "../model" }
 libc = "0.2"
 thiserror.workspace = true
+
+[build-dependencies]
+cc = "1.0"

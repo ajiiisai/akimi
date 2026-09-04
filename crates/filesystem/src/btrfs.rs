@@ -1,13 +1,13 @@
-use std::collections::{HashMap, VecDeque};
-use std::fs::{self, Metadata};
+use std::fs;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use akimi_ext4::{FilesystemInfo, FilesystemScan, ScanStats, ScanTimings, ScanWarnings};
-use akimi_model::{NameArena, Node, NodeArena, NodeId, NodeKind, ScanResult};
+use akimi_ext4::{FilesystemInfo, FilesystemScan};
 use thiserror::Error;
+
+mod direct;
 
 #[derive(Debug, Error)]
 pub enum BtrfsError {
@@ -22,6 +22,8 @@ pub enum BtrfsError {
     Arena(#[from] akimi_model::ArenaError),
     #[error(transparent)]
     Aggregate(#[from] akimi_model::AggregateError),
+    #[error("direct btrfs reader: {0}")]
+    Direct(String),
 }
 
 impl BtrfsError {
@@ -78,101 +80,7 @@ impl BtrfsFilesystem {
     }
 
     pub fn scan_with_threads(&mut self, _threads: usize) -> Result<FilesystemScan, BtrfsError> {
-        let root_metadata =
-            fs::symlink_metadata(&self.root).map_err(|source| BtrfsError::InspectPath {
-                path: self.root.clone(),
-                source,
-            })?;
-        let mut names = NameArena::default();
-        let root_name = names.push(b"/")?;
-        let root_node = node(NodeId::ROOT, root_name, &root_metadata, true);
-        let mut nodes = vec![root_node];
-        let mut queue = VecDeque::from([(self.root.clone(), NodeId::ROOT)]);
-        let mut seen = HashMap::new();
-        seen.insert(file_key(&root_metadata), NodeId::ROOT);
-        let mut stats = ScanStats {
-            directories: 1,
-            nodes: 1,
-            ..ScanStats::default()
-        };
-        let mut warnings = ScanWarnings::default();
-        let directory_started = Instant::now();
-
-        while let Some((directory, parent)) = queue.pop_front() {
-            let entries = match fs::read_dir(&directory) {
-                Ok(entries) => entries,
-                Err(_) => {
-                    warnings.directory_scan_errors += 1;
-                    continue;
-                }
-            };
-            for entry in entries {
-                let entry = match entry {
-                    Ok(entry) => entry,
-                    Err(_) => {
-                        warnings.directory_scan_errors += 1;
-                        continue;
-                    }
-                };
-                let path = entry.path();
-                let metadata = match fs::symlink_metadata(&path) {
-                    Ok(metadata) => metadata,
-                    Err(_) => {
-                        warnings.missing_inode_references += 1;
-                        continue;
-                    }
-                };
-                let key = file_key(&metadata);
-                let kind = kind(&metadata);
-                let owns_allocation = !seen.contains_key(&key);
-                if owns_allocation {
-                    seen.insert(key, NodeId(nodes.len() as u32));
-                }
-                let name = names.push(entry.file_name().as_bytes())?;
-                nodes.push(node_with_size(
-                    parent,
-                    name,
-                    &metadata,
-                    kind,
-                    owns_allocation,
-                ));
-                stats.directory_entries += 1;
-                stats.nodes += 1;
-                match kind {
-                    NodeKind::File => stats.files += 1,
-                    NodeKind::Directory => {
-                        stats.directories += 1;
-                        queue.push_back((path, NodeId((nodes.len() - 1) as u32)));
-                    }
-                    NodeKind::Symlink => stats.symlinks += 1,
-                    NodeKind::Other => stats.other += 1,
-                }
-                if !owns_allocation {
-                    stats.hard_link_entries += 1;
-                }
-            }
-        }
-
-        let directory_scan = directory_started.elapsed();
-        let tree_started = Instant::now();
-        let result = ScanResult::new(NodeArena::from_parts(nodes, names))?;
-        stats.allocated_inodes = seen.len() as u64;
-        let tree_build = tree_started.elapsed();
-        self.info.inode_count = seen.len() as u64;
-        self.info.reported_allocated_inodes = seen.len() as u64;
-        Ok(FilesystemScan {
-            result,
-            stats,
-            warnings,
-            workers: 1,
-            timings: ScanTimings {
-                open: self.open_time,
-                inode_scan: Duration::ZERO,
-                directory_scan,
-                tree_build,
-                aggregation: Duration::ZERO,
-            },
-        })
+        direct::scan(&self.root, &mut self.info, self.open_time)
     }
 }
 
@@ -186,46 +94,4 @@ fn is_btrfs(path: &Path) -> bool {
     // path is a valid NUL-terminated C string owned by this function.
     let result = unsafe { libc::statfs(path.as_ptr(), stats.as_mut_ptr()) };
     result == 0 && unsafe { stats.assume_init() }.f_type as u64 == 0x9123_683e
-}
-
-fn file_key(metadata: &Metadata) -> (u64, u64) {
-    (metadata.dev(), metadata.ino())
-}
-
-fn kind(metadata: &Metadata) -> NodeKind {
-    let file_type = metadata.file_type();
-    if file_type.is_dir() {
-        NodeKind::Directory
-    } else if file_type.is_file() {
-        NodeKind::File
-    } else if file_type.is_symlink() {
-        NodeKind::Symlink
-    } else {
-        NodeKind::Other
-    }
-}
-
-fn node(parent: NodeId, name: akimi_model::NameRef, metadata: &Metadata, root: bool) -> Node {
-    node_with_size(parent, name, metadata, NodeKind::Directory, root)
-}
-
-fn node_with_size(
-    parent: NodeId,
-    name: akimi_model::NameRef,
-    metadata: &Metadata,
-    kind: NodeKind,
-    owns_allocation: bool,
-) -> Node {
-    Node {
-        parent,
-        inode: metadata.ino(),
-        name,
-        kind,
-        logical_size: metadata.len(),
-        allocated_size: owns_allocation
-            .then_some(metadata.blocks() * 512)
-            .unwrap_or(0),
-        links: metadata.nlink() as u32,
-        mtime: metadata.mtime(),
-    }
 }

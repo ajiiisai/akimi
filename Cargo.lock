@@ -160,6 +160,7 @@ version = "0.1.0"
 dependencies = [
  "akimi-ext4",
  "akimi-model",
+ "cc",
  "libc",
  "thiserror 2.0.20",
 ]
