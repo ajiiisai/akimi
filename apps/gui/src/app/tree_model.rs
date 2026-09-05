@@ -1,8 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use akimi_ext4::FilesystemScan;
-use akimi_model::{NodeId, NodeKind};
+use akimi_model::{FilesystemScan, NodeId, NodeKind};
 
 const MAX_VISIBLE_ROWS: usize = 50_000;
 
@@ -75,22 +74,44 @@ impl TreeModel {
     }
 
     fn rebuild(&mut self, scan: &FilesystemScan) {
-        let mut rows = Vec::new();
-        push_node(
-            scan,
-            &self.expanded,
-            &mut self.sorted_children,
-            NodeId::ROOT,
-            0,
-            &mut rows,
-        );
+        self.rows.clear();
+        let arena = &scan.result.arena;
+        // Each frame holds the next sibling to visit. Memory grows with depth,
+        // and the row limit stops the walk even in very wide directories.
+        let mut stack: Vec<(Arc<[NodeId]>, usize)> = Vec::new();
+        if !arena.nodes().is_empty() {
+            stack.push((Arc::from([NodeId::ROOT]), 0));
+        }
+        while self.rows.len() < MAX_VISIBLE_ROWS {
+            let depth = stack.len().saturating_sub(1);
+            let Some((siblings, position)) = stack.last_mut() else {
+                break;
+            };
+            let Some(&id) = siblings.get(*position) else {
+                stack.pop();
+                continue;
+            };
+            *position += 1;
+            let expandable = arena.nodes()[id.index()].kind == NodeKind::Directory
+                && !arena.child_range(id).is_empty();
+            let expanded = expandable && self.expanded.contains(&id);
+            self.rows.push(TreeRow {
+                id,
+                depth,
+                expanded,
+                expandable,
+            });
+            if expanded && self.rows.len() < MAX_VISIBLE_ROWS {
+                stack.push((sorted_children(scan, &mut self.sorted_children, id), 0));
+            }
+        }
         self.row_index.clear();
         self.row_index.extend(
-            rows.iter()
+            self.rows
+                .iter()
                 .enumerate()
                 .map(|(position, row)| (row.id, position)),
         );
-        self.rows = rows;
     }
 }
 
@@ -112,9 +133,6 @@ pub(crate) fn ancestor_chain(scan: &FilesystemScan, mut id: NodeId) -> Vec<NodeI
         }
         id = parent;
         chain.push(id);
-        if chain.len() > 4096 {
-            break;
-        }
     }
 
     chain.reverse();
@@ -122,36 +140,6 @@ pub(crate) fn ancestor_chain(scan: &FilesystemScan, mut id: NodeId) -> Vec<NodeI
         chain.insert(0, NodeId::ROOT);
     }
     chain
-}
-
-fn push_node(
-    scan: &FilesystemScan,
-    expanded: &HashSet<NodeId>,
-    sorted: &mut HashMap<NodeId, Arc<[NodeId]>>,
-    id: NodeId,
-    depth: usize,
-    rows: &mut Vec<TreeRow>,
-) {
-    if rows.len() >= MAX_VISIBLE_ROWS {
-        return;
-    }
-
-    let is_directory = scan.result.arena.nodes()[id.index()].kind == NodeKind::Directory;
-    let expandable = is_directory && !scan.result.arena.child_range(id).is_empty();
-    let is_expanded = expandable && expanded.contains(&id);
-    rows.push(TreeRow {
-        id,
-        depth,
-        expanded: is_expanded,
-        expandable,
-    });
-
-    if is_expanded {
-        let children = sorted_children(scan, sorted, id);
-        for &child in children.iter() {
-            push_node(scan, expanded, sorted, child, depth + 1, rows);
-        }
-    }
 }
 
 fn sorted_children(
@@ -187,9 +175,42 @@ fn sorted_children(
 
 #[cfg(test)]
 mod tests {
-    use super::TreeModel;
-    use akimi_ext4::FilesystemScan;
-    use akimi_model::{NameArena, Node, NodeArena, NodeId, NodeKind, ScanResult};
+    use super::{TreeModel, MAX_VISIBLE_ROWS};
+    use akimi_model::{FilesystemScan, NameArena, Node, NodeArena, NodeId, NodeKind, ScanResult};
+
+    #[test]
+    fn walks_deep_trees_without_recursion() {
+        let mut names = NameArena::default();
+        let name = names.push(b"dir").unwrap();
+        let nodes = (0..20_000_u32)
+            .map(|id| node(NodeId(id.saturating_sub(1)), name, NodeKind::Directory, 1))
+            .collect();
+        let scan = scan(nodes, names);
+        let mut model = TreeModel::new(&scan);
+        assert_eq!(model.reveal(&scan, NodeId(19_999)), Some(19_999));
+        assert_eq!(model.rows().len(), 20_000);
+        assert_eq!(model.rows().last().unwrap().depth, 19_999);
+        model.collapse_all(&scan);
+        assert_eq!(model.rows().len(), 2);
+    }
+
+    #[test]
+    fn limits_wide_trees_and_handles_empty_scans() {
+        let empty = scan(Vec::new(), NameArena::default());
+        assert!(TreeModel::new(&empty).rows().is_empty());
+
+        let mut names = NameArena::default();
+        let name = names.push(b"entry").unwrap();
+        let mut nodes = vec![node(NodeId::ROOT, name, NodeKind::Directory, 0)];
+        nodes.extend(
+            (0..MAX_VISIBLE_ROWS + 10)
+                .map(|size| node(NodeId::ROOT, name, NodeKind::File, size as u64)),
+        );
+        let scan = scan(nodes, names);
+        let model = TreeModel::new(&scan);
+        assert_eq!(model.rows().len(), MAX_VISIBLE_ROWS);
+        assert_eq!(model.rows()[1].id.index(), MAX_VISIBLE_ROWS + 10);
+    }
 
     #[test]
     fn expanded_rows_are_nested_and_sorted_by_allocated_size() {
@@ -229,6 +250,10 @@ mod tests {
             node(NodeId(2), large, NodeKind::File, 100),
         ];
 
+        scan(nodes, names)
+    }
+
+    fn scan(nodes: Vec<Node>, names: NameArena) -> FilesystemScan {
         FilesystemScan {
             result: ScanResult::new(NodeArena::from_parts(nodes, names)).unwrap(),
             stats: Default::default(),

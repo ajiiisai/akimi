@@ -10,8 +10,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use akimi_ext4::FilesystemScan;
-use akimi_model::{NodeId, NodeKind};
+use akimi_model::{FilesystemScan, NodeId, NodeKind};
 use gpui_kit::component::{
     alert::Alert,
     breadcrumb::{Breadcrumb, BreadcrumbItem},
@@ -47,7 +46,7 @@ use formatting::{
     size as format_size,
 };
 use tree_model::{ancestor_chain, TreeModel};
-use treemap::{build_treemap, Rect, ScrollAmount, Treemap, TreemapViewport};
+use treemap::{build_treemap, LayoutSize, Rect, ScrollAmount, TreemapViewport};
 use ui::{
     app_mark, node_icon, number_cell as num_cell, share_color, table_header, toolbar_button,
     FILES_WIDTH as FILES_W, FOLDERS_WIDTH as FOLDERS_W, ITEMS_WIDTH as ITEMS_W,
@@ -73,10 +72,10 @@ impl ReadyState {
         mount_point: Option<PathBuf>,
         mount_device: Option<u64>,
         scan: Arc<FilesystemScan>,
-        map: Arc<Treemap>,
-        elapsed: Duration,
+        started: Instant,
     ) -> Self {
         let tree = TreeModel::new(&scan);
+        let map = Arc::new(build_treemap(&scan, NodeId::ROOT, LayoutSize::default()));
         Self {
             device,
             mount_point,
@@ -85,7 +84,7 @@ impl ReadyState {
             selected: NodeId::ROOT,
             tree,
             treemap: TreemapViewport::new(map),
-            elapsed,
+            elapsed: started.elapsed(),
         }
     }
 
@@ -128,7 +127,7 @@ struct DeleteProgress {
 enum Stage {
     Picker,
     Scanning { device: PathBuf },
-    Ready(ReadyState),
+    Ready(Box<ReadyState>),
     Failed { device: PathBuf, message: String },
 }
 
@@ -140,6 +139,7 @@ struct Akimi {
     tree_scroll: UniformListScrollHandle,
     delete_confirmation: Option<DeleteSelection>,
     deletion: Option<DeleteProgress>,
+    treemap_resize_task: Option<gpui::Task<()>>,
 }
 
 impl Akimi {
@@ -152,10 +152,12 @@ impl Akimi {
             tree_scroll: UniformListScrollHandle::new(),
             delete_confirmation: None,
             deletion: None,
+            treemap_resize_task: None,
         }
     }
 
     fn start_scan(&mut self, cx: &mut Context<Self>) {
+        self.treemap_resize_task = None;
         let Some(volume) = self.volumes.get(self.selected_volume) else {
             return;
         };
@@ -185,18 +187,13 @@ impl Akimi {
                 }
                 Err(error) => return Err(error.to_string()),
             };
-            let scan = Arc::new(scan);
-            // Build the initial root layout off the UI thread. Zoomed subtree
-            // layouts are built on demand and cached; window resizing only
-            // rescales whichever layout is active.
-            let map = Arc::new(build_treemap(&scan, NodeId::ROOT));
-            Ok::<_, String>((
+            // Prepare the tree and treemap before returning to the UI thread.
+            Ok::<_, String>(ReadyState::new(
                 device,
                 mount_point,
                 mount_device,
-                scan,
-                map,
-                started.elapsed(),
+                Arc::new(scan),
+                started,
             ))
         });
 
@@ -204,16 +201,7 @@ impl Akimi {
             let outcome = task.await;
             let _ = this.update(cx, |this, cx| {
                 match outcome {
-                    Ok((device, mount_point, mount_device, scan, map, elapsed)) => {
-                        this.stage = Stage::Ready(ReadyState::new(
-                            device,
-                            mount_point,
-                            mount_device,
-                            scan,
-                            map,
-                            elapsed,
-                        ));
-                    }
+                    Ok(ready) => this.stage = Stage::Ready(Box::new(ready)),
                     Err(message) => {
                         let device = match &this.stage {
                             Stage::Scanning { device } => device.clone(),
@@ -229,6 +217,7 @@ impl Akimi {
     }
 
     fn show_picker(&mut self, cx: &mut Context<Self>) {
+        self.treemap_resize_task = None;
         self.delete_confirmation = None;
         self.stage = Stage::Picker;
         cx.notify();
@@ -1420,6 +1409,33 @@ impl Akimi {
         )
     }
 
+    fn resize_treemap(&mut self, size: LayoutSize, cx: &mut Context<Self>) {
+        let Stage::Ready(ready) = &mut self.stage else {
+            return;
+        };
+        if !ready.treemap.resize(size) {
+            return;
+        }
+        let scan = ready.scan.clone();
+        let root = ready.treemap.root();
+        let executor = cx.background_executor().clone();
+        // Replacing this task cancels the debounce during a window or splitter drag.
+        self.treemap_resize_task = Some(cx.spawn(async move |this, cx| {
+            executor.timer(Duration::from_millis(75)).await;
+            let input = scan.clone();
+            let map = executor
+                .spawn(async move { Arc::new(build_treemap(&input, root, size)) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if let Stage::Ready(ready) = &mut this.stage {
+                    if Arc::ptr_eq(&scan, &ready.scan) && ready.treemap.accept_layout(map) {
+                        cx.notify();
+                    }
+                }
+            });
+        }));
+    }
+
     /// Tile labels are omitted because most would be truncated at this density.
     /// Selection exposes the name through the tree and status bar instead.
     fn render_treemap(&self, ready: &ReadyState, cx: &mut Context<Self>) -> AnyElement {
@@ -1432,9 +1448,9 @@ impl Akimi {
         // selection owns that whole rectangle.
         let outline = map.rect_for(ready.selected);
         let measured = self.map_bounds.clone();
-        let selection_color = cx.theme().danger;
         let owner = cx.weak_entity();
         let menu_owner = owner.clone();
+        let layout_owner = owner.clone();
 
         div()
             .id("treemap")
@@ -1457,35 +1473,39 @@ impl Akimi {
             )
             .child(
                 canvas(
-                    move |bounds, _window, _cx| measured.set(bounds),
+                    move |bounds, _window, cx| {
+                        measured.set(bounds);
+                        if let Some(size) =
+                            LayoutSize::new(bounds.size.width.into(), bounds.size.height.into())
+                        {
+                            cx.defer(move |cx| {
+                                let _ = layout_owner
+                                    .update(cx, |this, cx| this.resize_treemap(size, cx));
+                            });
+                        }
+                    },
                     move |bounds, _, window, _cx| {
-                        let origin = bounds.origin;
-                        let scale = bounds.size;
-                        let place = |rect: Rect| Bounds {
-                            origin: point(
-                                origin.x + scale.width * rect.x,
-                                origin.y + scale.height * rect.y,
-                            ),
-                            size: size(scale.width * rect.w, scale.height * rect.h),
+                        let canvas_rect = Rect {
+                            x: bounds.origin.x.into(),
+                            y: bounds.origin.y.into(),
+                            w: bounds.size.width.into(),
+                            h: bounds.size.height.into(),
                         };
+                        let device_scale = window.scale_factor();
+                        let bounds_for = |rect: Rect| Bounds {
+                            origin: point(px(rect.x), px(rect.y)),
+                            size: size(px(rect.w), px(rect.h)),
+                        };
+                        let place =
+                            |rect| treemap::geometry::place(rect, canvas_rect, device_scale);
                         for tile in map.tiles() {
                             if tile.is_frame() {
                                 continue;
                             }
                             let placed = place(tile.rect());
-                            let mut fill_bounds = placed;
-                            // Trailing-edge bleed: tile edges land on fractional
-                            // device pixels, so exactly-adjacent tiles leave
-                            // hairline seams of the canvas background showing
-                            // through. Overpainting one device pixel on the
-                            // right and bottom edges closes those seams; where
-                            // tiles truly butt, the neighbour paints over the
-                            // bleed.
-                            fill_bounds.size.width += px(1.0);
-                            fill_bounds.size.height += px(1.0);
+                            let fill_bounds = bounds_for(placed);
                             let (hue, shadow, light) = tile.paint_colors();
-                            let min_dim =
-                                f32::from(placed.size.width).min(f32::from(placed.size.height));
+                            let min_dim = placed.w.min(placed.h);
                             if min_dim >= 3.0 {
                                 window.paint_quad(fill(
                                     fill_bounds,
@@ -1500,16 +1520,15 @@ impl Akimi {
                             }
                         }
                         if let Some(rect) = outline {
-                            // The stroke starts on the tile's true boundary.
-                            // GPUI paints the border inward, so shrinking the
-                            // bounds here would leave a visible moat around it.
                             let selected = place(rect);
+                            let (outline, width, color) =
+                                treemap::geometry::selection(selected, device_scale);
                             window.paint_quad(quad(
-                                selected,
+                                bounds_for(outline),
                                 px(0.0),
                                 transparent_black(),
-                                px(2.0),
-                                selection_color,
+                                px(width),
+                                rgb(color),
                                 BorderStyle::Solid,
                             ));
                         }
