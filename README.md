@@ -112,7 +112,25 @@ cargo clippy --workspace --all-targets
 cargo test --workspace
 ```
 
-The workspace contains the GUI in `apps/gui`, the CLI in `apps/cli`, the ext4 scanner in `crates/ext4`, and the shared data model in `crates/model`.
+The workspace separates scan data from filesystem access:
+
+- `crates/model` owns the node arena, aggregation, ranking, and shared scan types. It has no native filesystem dependencies.
+- `crates/ext4` owns the ext4 scanner and its `libext2fs` bindings.
+- `crates/filesystem` selects the scanner and implements btrfs access. Add new filesystem implementations here and return the shared `FilesystemScan` type.
+- `apps/cli` and `apps/gui` use `akimi-filesystem` for access and `akimi-model` for scan data.
+- `apps/btrfs-helper` runs privileged btrfs scans and serializes the shared scan result for the GUI.
+
+The GUI prepares its initial tree and treemap on a background thread. Tree rebuilds reuse row storage and stop at 50,000 visible rows.
+
+Treemaps use the measured panel dimensions to keep tile proportions correct. Window and panel resizing rebuild the layout after a 75 ms pause in the drag. Each layout has a 20,000-tile budget. Files below the 3-pixel cutoff share a remainder area that preserves their combined size.
+
+Directories with both files and subdirectories keep their direct files together in a separate rectangle, as QDirStat does. Allocation ties use logical size before node order. Rows use rounded pixel boundaries, and fills share device-pixel edges. Selection uses a single white pixel drawn inward from the same tile boundary.
+
+To export a synthetic treemap with the current layout, palette, and selection outline:
+
+```bash
+AKIMI_TREEMAP_PREVIEW=/tmp/akimi-treemap.svg cargo test -p akimi-gui export_layout_preview -- --ignored
+```
 
 ## License
 
