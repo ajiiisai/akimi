@@ -1,12 +1,41 @@
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
-use akimi_ext4::FilesystemScan;
-use akimi_model::{NodeId, NodeKind};
+use akimi_model::{FilesystemScan, NodeId, NodeKind};
 
+pub(crate) mod geometry;
 mod viewport;
 
 pub(crate) use viewport::{ScrollAmount, TreemapViewport};
+
+pub(crate) const SELECTION_COLOR: u32 = 0xffffff;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LayoutSize {
+    width: u32,
+    height: u32,
+}
+
+impl LayoutSize {
+    pub(crate) fn new(width: f32, height: f32) -> Option<Self> {
+        if !width.is_finite() || !height.is_finite() || width < 1.0 || height < 1.0 {
+            return None;
+        }
+        Some(Self {
+            width: width.round() as u32,
+            height: height.round() as u32,
+        })
+    }
+}
+
+impl Default for LayoutSize {
+    fn default() -> Self {
+        Self {
+            width: 1600,
+            height: 900,
+        }
+    }
+}
 
 const TYPE_COLORS: [u32; 11] = [
     0x3f474e, 0x59636b, 0xce62d5, 0x8f70d5, 0x32ad9f, 0xc88a38, 0x5c86cf, 0x78a64d, 0xd05c5c,
@@ -52,35 +81,32 @@ struct Tile {
 ///
 /// `items` must be sorted largest first. `total` is the sum of *every* size the
 /// rectangle stands for, including any tail the caller trimmed off as too small
-/// to draw; that keeps the visible tiles' proportions truthful. Layout stops as
-/// soon as the leftover rectangle is thinner than `min_side`.
+/// to draw. The returned rectangle holds any undrawn tail, preserving its area.
 fn squarify(
     items: &[(NodeId, u64)],
     mut rect: Rect,
     total: u64,
     min_side: f32,
     out: &mut Vec<Tile>,
-) {
+) -> Option<Rect> {
     if items.is_empty() || total == 0 || rect.w <= 0.0 || rect.h <= 0.0 {
-        return;
+        return None;
     }
-    // Pixels per byte. Constant for the whole call: every row consumes exactly
-    // the area of the sizes it holds, so the leftover rectangle always matches
-    // the leftover mass.
-    let scale = (rect.w as f64 * rect.h as f64) / total as f64;
-    if !scale.is_finite() || scale <= 0.0 {
-        return;
-    }
-
     let mut index = 0;
+    let mut remaining = total;
     while index < items.len() {
+        // Each rounded row changes the pixels available to the remaining bytes.
+        let scale = (rect.w as f64 * rect.h as f64) / remaining as f64;
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
         let side = rect.w.min(rect.h) as f64;
         if side < min_side as f64 {
-            return;
+            return Some(rect);
         }
         let largest = items[index].1 as f64 * scale;
         if largest <= 0.0 {
-            return;
+            return Some(rect);
         }
         let mut sum = 0.0_f64;
         let mut count = 0_usize;
@@ -99,48 +125,56 @@ fn squarify(
             count += 1;
         }
         if count == 0 {
-            return;
+            return Some(rect);
         }
 
-        let thickness = (sum / side) as f32;
-        let mut offset = 0.0_f32;
+        let thickness = ((sum / side).round() as f32).min(rect.w.max(rect.h));
+        if thickness < min_side {
+            return Some(rect);
+        }
+        let mut offset = 0.0_f64;
         if rect.w >= rect.h {
             for item in &items[index..index + count] {
                 let area = item.1 as f64 * scale;
-                let height = ((area / sum) * side) as f32;
+                let start = offset.round() as f32;
+                offset += (area / sum) * side;
+                let height = ((offset.round() as f32).min(rect.h) - start).max(0.0);
                 out.push(Tile {
                     id: item.0,
                     rect: Rect {
                         x: rect.x,
-                        y: rect.y + offset,
+                        y: rect.y + start,
                         w: thickness,
                         h: height,
                     },
                 });
-                offset += height;
             }
             rect.x += thickness;
             rect.w -= thickness;
         } else {
             for item in &items[index..index + count] {
                 let area = item.1 as f64 * scale;
-                let width = ((area / sum) * side) as f32;
+                let start = offset.round() as f32;
+                offset += (area / sum) * side;
+                let width = ((offset.round() as f32).min(rect.w) - start).max(0.0);
                 out.push(Tile {
                     id: item.0,
                     rect: Rect {
-                        x: rect.x + offset,
+                        x: rect.x + start,
                         y: rect.y,
                         w: width,
                         h: thickness,
                     },
                 });
-                offset += width;
             }
             rect.y += thickness;
             rect.h -= thickness;
         }
+        remaining =
+            remaining.saturating_sub(items[index..index + count].iter().map(|item| item.1).sum());
         index += count;
     }
+    (remaining > 0 && rect.w > 0.0 && rect.h > 0.0).then_some(rect)
 }
 
 /// Worst (largest) aspect ratio in a row of area `sum` laid along `side`, whose
@@ -160,6 +194,10 @@ enum TileKind {
     /// It is never visible itself; it only exists so subdivision has a tile
     /// to replace.
     Frame,
+    /// A virtual group containing the directory's direct files.
+    Files,
+    /// The expanded file group. It must not replace the directory's outline.
+    FileFrame,
     /// A file, or a directory too small to be worth subdividing. Either way,
     /// it stands for its whole subtree.
     Leaf,
@@ -187,7 +225,7 @@ impl MapTile {
     }
 
     pub(crate) fn is_frame(&self) -> bool {
-        self.kind == TileKind::Frame
+        matches!(self.kind, TileKind::Frame | TileKind::FileFrame)
     }
 
     pub(crate) fn paint_colors(&self) -> (u32, u32, u32) {
@@ -197,8 +235,9 @@ impl MapTile {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct Treemap {
+    size: LayoutSize,
+    root: NodeId,
     /// Ordered so a directory always precedes the children painted on top of
     /// it, which also makes the last hit in a reverse scan the deepest one.
     tiles: Vec<MapTile>,
@@ -231,12 +270,12 @@ impl Treemap {
     }
 }
 
-/// Reference canvas the layout is computed against. Tiles are stored in unit
-/// space and scaled to whatever the window is. Resizing never changes a
-/// layout; selecting a new zoom root does.
+/// Initial size before the GUI measures its canvas.
+#[cfg(test)]
 const MAP_REF_W: f32 = 1600.0;
+#[cfg(test)]
 const MAP_REF_H: f32 = 900.0;
-const MAP_MIN_SIDE: f32 = 1.0;
+const MAP_MIN_SIDE: f32 = 3.0;
 /// Below this, a child is folded into its directory's `Rest` block instead of
 /// getting a rectangle of its own.
 const MAP_MIN_AREA: f32 = 9.0;
@@ -267,7 +306,9 @@ const MAP_MAX_TILES: usize = 20_000;
 ///
 /// A directory is committed to being a frame only once there is budget for all
 /// of its children, so a frame is never left half covered.
-pub(crate) fn build_treemap(scan: &FilesystemScan, root: NodeId) -> Treemap {
+pub(crate) fn build_treemap(scan: &FilesystemScan, root: NodeId, size: LayoutSize) -> Treemap {
+    let width = size.width as f32;
+    let height = size.height as f32;
     let mut tiles: Vec<MapTile> = Vec::new();
     if root.index() < scan.result.arena.nodes().len() {
         tiles.push(MapTile {
@@ -275,8 +316,8 @@ pub(crate) fn build_treemap(scan: &FilesystemScan, root: NodeId) -> Treemap {
             rect: Rect {
                 x: 0.0,
                 y: 0.0,
-                w: MAP_REF_W,
-                h: MAP_REF_H,
+                w: width,
+                h: height,
             },
             color: DIR_COLOR,
             depth: 0,
@@ -298,15 +339,19 @@ pub(crate) fn build_treemap(scan: &FilesystemScan, root: NodeId) -> Treemap {
             // there first. Anything over the allowance is folded into the
             // directory's remainder block, which is why this can never leave a
             // frame half covered.
-            let share = tile.rect.area() / (MAP_REF_W * MAP_REF_H);
+            let share = tile.rect.area() / (width * height);
             let allowance = ((share * MAP_MAX_TILES as f32) as usize).clamp(2, remaining);
             if !subdivide(scan, &tile, allowance, &mut pieces, &mut children) {
                 continue;
             }
-            tiles[candidate.position].kind = TileKind::Frame;
+            tiles[candidate.position].kind = if tile.kind == TileKind::Files {
+                TileKind::FileFrame
+            } else {
+                TileKind::Frame
+            };
             for child in children.drain(..) {
                 let position = tiles.len();
-                if child.kind == TileKind::Leaf {
+                if matches!(child.kind, TileKind::Leaf | TileKind::Files) {
                     queue.push(Candidate::new(&child, position));
                 }
                 tiles.push(child);
@@ -314,20 +359,25 @@ pub(crate) fn build_treemap(scan: &FilesystemScan, root: NodeId) -> Treemap {
         }
     }
     for tile in &mut tiles {
-        tile.rect.x /= MAP_REF_W;
-        tile.rect.w /= MAP_REF_W;
-        tile.rect.y /= MAP_REF_H;
-        tile.rect.h /= MAP_REF_H;
+        tile.rect.x /= width;
+        tile.rect.w /= width;
+        tile.rect.y /= height;
+        tile.rect.h /= height;
     }
     // `Rest` tiles borrow their parent's id, so they must not displace the
     // parent's own tile in the lookup.
     let index = tiles
         .iter()
         .enumerate()
-        .filter(|(_, tile)| tile.kind != TileKind::Rest)
+        .filter(|(_, tile)| matches!(tile.kind, TileKind::Leaf | TileKind::Frame))
         .map(|(position, tile)| (tile.id, position as u32))
         .collect();
-    Treemap { tiles, index }
+    Treemap {
+        tiles,
+        index,
+        size,
+        root,
+    }
 }
 
 /// A tile queued for subdivision, ordered by area so the biggest rectangles are
@@ -387,25 +437,34 @@ fn subdivide(
     {
         return false;
     }
-    let Some((items, total)) = partition(scan, tile.id, tile.rect, allowance) else {
+    let Some((items, total)) = partition(
+        scan,
+        tile.id,
+        tile.rect,
+        allowance,
+        tile.kind == TileKind::Files,
+    ) else {
         return false;
     };
 
     pieces.clear();
-    squarify(&items, tile.rect, total, MAP_MIN_SIDE, pieces);
+    let remainder = squarify(&items, tile.rect, total, MAP_MIN_SIDE, pieces);
     for piece in pieces.iter() {
-        if piece.rect.w < MAP_MIN_SIDE || piece.rect.h < MAP_MIN_SIDE {
-            continue;
-        }
-        let kind = if piece.id == tile.id {
+        let kind = if piece.rect.w < MAP_MIN_SIDE || piece.rect.h < MAP_MIN_SIDE {
             TileKind::Rest
+        } else if piece.id == tile.id {
+            TileKind::Files
         } else {
             TileKind::Leaf
         };
         children.push(MapTile {
-            id: piece.id,
+            id: if kind == TileKind::Rest {
+                tile.id
+            } else {
+                piece.id
+            },
             rect: piece.rect,
-            color: if kind == TileKind::Rest {
+            color: if matches!(kind, TileKind::Rest | TileKind::Files) {
                 REST_COLOR
             } else {
                 type_color_index(scan, piece.id)
@@ -414,12 +473,20 @@ fn subdivide(
             kind,
         });
     }
+    if let Some(rect) = remainder {
+        children.push(MapTile {
+            id: tile.id,
+            rect,
+            color: REST_COLOR,
+            depth: tile.depth + 1,
+            kind: TileKind::Rest,
+        });
+    }
     !children.is_empty()
 }
 
-/// How a directory's rectangle is divided up: at most `allowance` pieces,
-/// largest first, the last of which stands for everything left over. The sizes
-/// sum to `total`, so the pieces cover the rectangle exactly.
+/// Select visible children, largest first, reserving one tile for the tail.
+/// `total` includes omitted children so the layout can preserve their area.
 ///
 /// Returns `None` when nothing inside is worth drawing separately, which leaves
 /// the directory as a single leaf rather than a block of undifferentiated
@@ -429,18 +496,35 @@ fn partition(
     parent: NodeId,
     rect: Rect,
     allowance: usize,
+    files_only: bool,
 ) -> Option<(Vec<(NodeId, u64)>, u64)> {
     let totals = &scan.result.totals;
-    let mut items: Vec<(NodeId, u64)> = scan
-        .result
-        .arena
-        .child_range(parent)
-        .map(|index| NodeId(index as u32))
-        .filter_map(|id| {
-            let size = totals[id.index()].recursive_allocated;
-            (size > 0).then_some((id, size))
-        })
-        .collect();
+    let arena = &scan.result.arena;
+    let range = arena.child_range(parent);
+    let group_files = !files_only
+        && range.clone().any(|index| {
+            arena.nodes()[index].kind == NodeKind::Directory
+                && totals[index].recursive_allocated > 0
+        });
+    let mut files_size = 0_u64;
+    let mut files_logical = 0_u64;
+    let mut items = Vec::new();
+    for index in range {
+        let size = totals[index].recursive_allocated;
+        let directory = arena.nodes()[index].kind == NodeKind::Directory;
+        if size == 0 || (files_only && directory) {
+            continue;
+        }
+        if group_files && !directory {
+            files_size = files_size.saturating_add(size);
+            files_logical = files_logical.saturating_add(totals[index].recursive_logical);
+        } else {
+            items.push((NodeId(index as u32), size));
+        }
+    }
+    if files_size > 0 {
+        items.push((parent, files_size));
+    }
     if items.is_empty() {
         return None;
     }
@@ -461,13 +545,25 @@ fn partition(
     let capacity = ((rect.area() / MAP_MIN_AREA).ceil() as usize)
         .min(allowance.saturating_sub(1))
         .max(1);
+    let logical_size = |id: NodeId| {
+        if id == parent && group_files {
+            files_logical
+        } else {
+            totals[id.index()].recursive_logical
+        }
+    };
+    let compare = |left: &(NodeId, u64), right: &(NodeId, u64)| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| logical_size(right.0).cmp(&logical_size(left.0)))
+            .then_with(|| left.0.cmp(&right.0))
+    };
     if items.len() > capacity {
-        items.select_nth_unstable_by(capacity, |left, right| {
-            right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0))
-        });
+        items.select_nth_unstable_by(capacity, compare);
         items.truncate(capacity);
     }
-    items.sort_unstable_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    items.sort_unstable_by(compare);
 
     let scale = rect.area() as f64 / total as f64;
     let keep = items
@@ -479,13 +575,6 @@ fn partition(
     }
     items.truncate(keep);
 
-    let drawn: u64 = items.iter().map(|(_, size)| *size).sum();
-    if let Some(rest) = total.checked_sub(drawn).filter(|rest| *rest > 0) {
-        // The remainder can outweigh individual children, so it has to take
-        // its place in the ordering squarify relies on.
-        let at = items.partition_point(|(_, size)| *size > rest);
-        items.insert(at, (parent, rest));
-    }
     Some((items, total))
 }
 
@@ -535,7 +624,7 @@ fn file_type_index(name: &[u8]) -> usize {
 
 fn shade(color: u32, factor: f32) -> u32 {
     let channel = |shift: u32| {
-        let value = (((color >> shift) & 0xff) as f32 * factor).clamp(0.0, 255.0) as u32;
+        let value = (((color >> shift) & 0xff_u32) as f32 * factor).clamp(0.0, 255.0) as u32;
         value << shift
     };
     channel(16) | channel(8) | channel(0)
@@ -552,385 +641,11 @@ fn tile_hue(tile: &MapTile) -> u32 {
 /// readable without a stroke or gap.
 fn tile_light_range(kind: TileKind) -> (f32, f32) {
     match kind {
-        TileKind::Frame => (0.90, 1.0),
-        TileKind::Rest => (0.86, 1.04),
+        TileKind::Frame | TileKind::FileFrame => (0.90, 1.0),
+        TileKind::Rest | TileKind::Files => (0.86, 1.04),
         TileKind::Leaf => (0.84, 1.08),
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{
-        build_treemap, squarify, tile_hue, tile_light_range, worst_aspect, MapTile, Rect, Tile,
-        TileKind, ARCHIVE_COLOR, DIR_COLOR, MAP_MAX_TILES, MAP_MIN_NEST, MAP_REF_H, MAP_REF_W,
-        TYPE_COLORS, UNKNOWN_COLOR,
-    };
-    use akimi_ext4::FilesystemScan;
-    use akimi_model::{NameArena, Node, NodeArena, NodeId, NodeKind, ScanResult};
-    use std::collections::HashMap;
-
-    const CANVAS: Rect = Rect {
-        x: 0.0,
-        y: 0.0,
-        w: 400.0,
-        h: 300.0,
-    };
-
-    fn lay_out(items: &[(NodeId, u64)]) -> Vec<Tile> {
-        let total = items.iter().map(|(_, size)| size).sum::<u64>();
-        let mut tiles = Vec::new();
-        squarify(items, CANVAS, total, 0.0, &mut tiles);
-        tiles
-    }
-
-    #[test]
-    fn files_are_coloured_by_extension_case_insensitively() {
-        use super::{
-            file_type_index, ARCHIVE_COLOR, AUDIO_COLOR, CODE_COLOR, DOC_COLOR, EXEC_COLOR,
-            IMAGE_COLOR, UNKNOWN_COLOR, VIDEO_COLOR,
-        };
-        assert_eq!(file_type_index(b"shot.png"), IMAGE_COLOR);
-        assert_eq!(file_type_index(b"movie.MKV"), VIDEO_COLOR);
-        assert_eq!(file_type_index(b"sound.Ogg"), AUDIO_COLOR);
-        assert_eq!(file_type_index(b"bundle.PAK"), ARCHIVE_COLOR);
-        assert_eq!(file_type_index(b"notes.md"), DOC_COLOR);
-        assert_eq!(file_type_index(b"main.rs"), CODE_COLOR);
-        assert_eq!(file_type_index(b"game.exe"), EXEC_COLOR);
-        assert_eq!(file_type_index(b"README"), UNKNOWN_COLOR);
-        assert_eq!(file_type_index(b"archive.tar.gz"), ARCHIVE_COLOR);
-        assert_eq!(file_type_index(b".bashrc"), UNKNOWN_COLOR);
-        assert_eq!(file_type_index(b"trailing."), UNKNOWN_COLOR);
-    }
-
-    #[test]
-    fn squarify_preserves_area_and_items() {
-        let tiles = lay_out(&[(NodeId(1), 60), (NodeId(2), 30), (NodeId(3), 10)]);
-        assert_eq!(tiles.len(), 3);
-        let area = tiles.iter().map(|tile| tile.rect.area()).sum::<f32>();
-        assert!(
-            (area - CANVAS.area()).abs() < 1.0,
-            "laid out {area} of {}",
-            CANVAS.area()
-        );
-    }
-
-    #[test]
-    fn squarify_areas_match_sizes() {
-        let items = [(NodeId(1), 60_u64), (NodeId(2), 30), (NodeId(3), 10)];
-        let tiles = lay_out(&items);
-        for (tile, (_, size)) in tiles.iter().zip(items.iter()) {
-            let expected = CANVAS.area() * (*size as f32 / 100.0);
-            assert!(
-                (tile.rect.area() - expected).abs() < 1.0,
-                "tile area {} != {expected}",
-                tile.rect.area()
-            );
-        }
-    }
-
-    #[test]
-    fn squarify_tiles_do_not_overlap() {
-        let tiles = lay_out(&[
-            (NodeId(1), 50),
-            (NodeId(2), 20),
-            (NodeId(3), 15),
-            (NodeId(4), 10),
-            (NodeId(5), 5),
-        ]);
-        for (index, left) in tiles.iter().enumerate() {
-            for right in tiles.iter().skip(index + 1) {
-                let overlap_w = (left.rect.x + left.rect.w).min(right.rect.x + right.rect.w)
-                    - left.rect.x.max(right.rect.x);
-                let overlap_h = (left.rect.y + left.rect.h).min(right.rect.y + right.rect.h)
-                    - left.rect.y.max(right.rect.y);
-                assert!(
-                    overlap_w <= 0.0001 || overlap_h <= 0.0001,
-                    "tiles {index} overlap by {overlap_w}x{overlap_h}"
-                );
-            }
-        }
-    }
-    #[test]
-    fn squarify_keeps_tiles_near_square() {
-        let items: Vec<(NodeId, u64)> = (1..=20)
-            .map(|n| (NodeId(n), (21 - n as u64) * 10))
-            .collect();
-        let tiles = lay_out(&items);
-        for tile in &tiles {
-            let ratio = (tile.rect.w / tile.rect.h).max(tile.rect.h / tile.rect.w);
-            assert!(ratio < 4.0, "aspect ratio {ratio} is a sliver");
-        }
-    }
-
-    #[test]
-    fn squarify_stops_when_the_strip_gets_thin() {
-        let mut items = vec![(NodeId(1), 1_000_000_u64)];
-        items.extend((2..500).map(|n| (NodeId(n), 1_u64)));
-        let total = items.iter().map(|(_, size)| size).sum::<u64>();
-        let mut tiles = Vec::new();
-        squarify(&items, CANVAS, total, 3.0, &mut tiles);
-        assert!(tiles.len() < items.len());
-        assert_eq!(tiles[0].id, NodeId(1));
-    }
-
-    #[test]
-    fn worst_aspect_is_one_for_a_square() {
-        assert!((worst_aspect(10.0, 100.0, 100.0, 100.0) - 1.0).abs() < 1e-9);
-    }
-    fn synthetic_scan(sizes: &[u64], leaves: u64) -> FilesystemScan {
-        let mut names = NameArena::with_capacity(64);
-        let root_name = names.push(b"/").unwrap();
-        let dir_name = names.push(b"dir").unwrap();
-        let file_name = names.push(b"file").unwrap();
-
-        let dir = |parent: NodeId, name| Node {
-            parent,
-            inode: 0,
-            name,
-            kind: NodeKind::Directory,
-            logical_size: 0,
-            allocated_size: 0,
-            links: 1,
-            mtime: 0,
-        };
-
-        // Nodes must be grouped in ascending parent order: root, then the
-        // top-level directories, then every directory's files.
-        let mut nodes = vec![dir(NodeId::ROOT, root_name)];
-        for _ in sizes {
-            nodes.push(dir(NodeId::ROOT, dir_name));
-        }
-        for (index, total) in sizes.iter().enumerate() {
-            let parent = NodeId(index as u32 + 1);
-            for _ in 0..leaves {
-                nodes.push(Node {
-                    parent,
-                    inode: 0,
-                    name: file_name,
-                    kind: NodeKind::File,
-                    logical_size: total / leaves,
-                    allocated_size: total / leaves,
-                    links: 1,
-                    mtime: 0,
-                });
-            }
-        }
-
-        FilesystemScan {
-            result: ScanResult::new(NodeArena::from_parts(nodes, names)).unwrap(),
-            stats: Default::default(),
-            timings: Default::default(),
-            warnings: Default::default(),
-            workers: 1,
-        }
-    }
-    #[test]
-    fn every_top_level_folder_gets_tiles() {
-        let sizes = [651_000, 114_000, 31_000, 1_900, 1_100, 700];
-        let scan = synthetic_scan(&sizes, 100);
-        let map = build_treemap(&scan, NodeId::ROOT);
-        for index in 0..sizes.len() {
-            let id = NodeId(index as u32 + 1);
-            assert!(
-                map.index.contains_key(&id),
-                "top-level folder {index} is missing from the map"
-            );
-        }
-    }
-    #[test]
-    fn large_folders_are_drawn_nested() {
-        let scan = synthetic_scan(&[651_000, 114_000], 400);
-        let map = build_treemap(&scan, NodeId::ROOT);
-        for id in [NodeId(1), NodeId(2)] {
-            let tile = map.tiles[map.index[&id] as usize];
-            assert_eq!(
-                tile.kind,
-                TileKind::Frame,
-                "folder {id:?} was drawn as a flat leaf"
-            );
-        }
-        let leaves = map.tiles.iter().filter(|tile| tile.depth == 2).count();
-        assert!(leaves > 200, "only {leaves} files drawn");
-    }
-    #[test]
-    fn frames_are_fully_covered_by_their_children() {
-        let scan = synthetic_scan(&[900_000, 250_000, 40_000], 20_000);
-        let map = build_treemap(&scan, NodeId::ROOT);
-        let nodes = scan.result.arena.nodes();
-
-        let mut covered: HashMap<NodeId, f32> = HashMap::new();
-        for tile in &map.tiles {
-            if tile.id == NodeId::ROOT && tile.kind != TileKind::Rest {
-                continue;
-            }
-            let parent = if tile.kind == TileKind::Rest {
-                tile.id
-            } else {
-                nodes[tile.id.index()].parent
-            };
-            *covered.entry(parent).or_default() += tile.rect.area();
-        }
-
-        let mut frames = 0;
-        for tile in &map.tiles {
-            if tile.kind != TileKind::Frame {
-                continue;
-            }
-            frames += 1;
-            // Children partition the whole tile edge to edge, like QDirStat:
-            // no frame may show through.
-            let inner = tile.rect.w * tile.rect.h;
-            let area = covered.get(&tile.id).copied().unwrap_or(0.0);
-            assert!(
-                area >= inner * 0.99,
-                "{:?} covers {area} of {inner}, leaving dead space",
-                tile.id
-            );
-        }
-        assert!(frames >= 3, "only {frames} folders were subdivided");
-        assert!(
-            map.tiles.iter().any(|tile| tile.kind == TileKind::Rest),
-            "the undrawable tail produced no remainder block"
-        );
-    }
-    #[test]
-    fn nested_tiles_stay_inside_their_parent() {
-        let scan = synthetic_scan(&[651_000, 114_000, 31_000], 200);
-        let map = build_treemap(&scan, NodeId::ROOT);
-        let nodes = scan.result.arena.nodes();
-        for tile in &map.tiles {
-            if tile.id == NodeId::ROOT {
-                continue;
-            }
-            let parent = if tile.kind == TileKind::Rest {
-                tile.id
-            } else {
-                nodes[tile.id.index()].parent
-            };
-            let outer = map.tiles[map.index[&parent] as usize].rect;
-            assert!(
-                tile.rect.x >= outer.x - 1e-4
-                    && tile.rect.y >= outer.y - 1e-4
-                    && tile.rect.x + tile.rect.w <= outer.x + outer.w + 1e-4
-                    && tile.rect.y + tile.rect.h <= outer.y + outer.h + 1e-4,
-                "{:?} escapes its parent",
-                tile.rect
-            );
-        }
-    }
-    #[test]
-    fn collapsed_directories_are_darker_than_unknown_files() {
-        let brightness = |colour: u32| {
-            (0..3)
-                .map(|byte| (colour >> (byte * 8)) & 0xff)
-                .sum::<u32>()
-        };
-        assert!(brightness(TYPE_COLORS[DIR_COLOR]) < brightness(TYPE_COLORS[UNKNOWN_COLOR]));
-    }
-    #[test]
-    fn same_type_tiles_share_one_colour() {
-        let tile = |id: NodeId| MapTile {
-            id,
-            rect: Rect {
-                x: 0.0,
-                y: 0.0,
-                w: 6.0,
-                h: 6.0,
-            },
-            color: ARCHIVE_COLOR,
-            depth: 2,
-            kind: TileKind::Leaf,
-        };
-        assert_eq!(tile_hue(&tile(NodeId(7))), tile_hue(&tile(NodeId(19))));
-    }
-
-    #[test]
-    fn tile_light_sweep_crosses_the_base_colour() {
-        let (shadow, light) = tile_light_range(TileKind::Leaf);
-        assert!(shadow < 1.0);
-        assert!(light > 1.0);
-
-        let (rest_shadow, rest_light) = tile_light_range(TileKind::Rest);
-        assert!(rest_light - rest_shadow < light - shadow);
-    }
-    #[test]
-    fn small_folders_stop_nesting() {
-        let mut sizes = vec![10_000_000_u64];
-        sizes.extend(std::iter::repeat_n(500, 1_500));
-        let scan = synthetic_scan(&sizes, 4);
-        let map = build_treemap(&scan, NodeId::ROOT);
-
-        let small = map.tiles[map.index[&NodeId(1_000)] as usize];
-        let width = small.rect.w * MAP_REF_W;
-        let height = small.rect.h * MAP_REF_H;
-        assert!(
-            width < MAP_MIN_NEST && height < MAP_MIN_NEST,
-            "{width}x{height} is big enough to nest into"
-        );
-        assert_eq!(small.kind, TileKind::Leaf);
-
-        assert_eq!(
-            map.tiles[map.index[&NodeId(1)] as usize].kind,
-            TileKind::Frame
-        );
-    }
-    #[test]
-    fn tile_areas_track_folder_sizes() {
-        let sizes = [651_000_u64, 114_000, 31_000];
-        let scan = synthetic_scan(&sizes, 100);
-        let map = build_treemap(&scan, NodeId::ROOT);
-        let total: u64 = sizes.iter().sum();
-        for (index, size) in sizes.iter().enumerate() {
-            let share = map.tiles[map.index[&NodeId(index as u32 + 1)] as usize]
-                .rect
-                .area();
-            let expected = *size as f32 / total as f32;
-            assert!(
-                (share - expected).abs() < 0.01,
-                "folder {index} covers {share} of the map, expected {expected}"
-            );
-        }
-    }
-    #[test]
-    fn tile_budget_is_respected() {
-        let scan = synthetic_scan(&[651_000, 114_000, 31_000], 40_000);
-        let map = build_treemap(&scan, NodeId::ROOT);
-        assert!(map.tiles.len() <= MAP_MAX_TILES);
-        assert!(
-            map.tiles.len() > MAP_MAX_TILES / 2,
-            "budget went unused: only {} tiles",
-            map.tiles.len()
-        );
-    }
-    #[test]
-    fn parents_are_stored_before_their_children() {
-        let scan = synthetic_scan(&[651_000, 114_000, 31_000], 200);
-        let map = build_treemap(&scan, NodeId::ROOT);
-        let nodes = scan.result.arena.nodes();
-        for (position, tile) in map.tiles.iter().enumerate() {
-            if tile.id == NodeId::ROOT {
-                continue;
-            }
-            let parent = if tile.kind == TileKind::Rest {
-                tile.id
-            } else {
-                nodes[tile.id.index()].parent
-            };
-            assert!((map.index[&parent] as usize) < position);
-        }
-    }
-    #[test]
-    fn remainder_blocks_do_not_shadow_their_parent() {
-        let scan = synthetic_scan(&[900_000, 250_000], 20_000);
-        let map = build_treemap(&scan, NodeId::ROOT);
-        assert!(
-            map.tiles.iter().any(|tile| tile.kind == TileKind::Rest),
-            "expected a remainder block for the undrawable tail"
-        );
-        for (id, position) in &map.index {
-            let tile = map.tiles[*position as usize];
-            assert_ne!(tile.kind, TileKind::Rest);
-            assert_eq!(tile.id, *id);
-        }
-    }
-}
+mod tests;

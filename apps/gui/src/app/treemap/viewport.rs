@@ -1,10 +1,9 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use akimi_ext4::FilesystemScan;
-use akimi_model::{NodeId, NodeKind};
+use akimi_model::{FilesystemScan, NodeId, NodeKind};
 
-use super::{build_treemap, Treemap};
+use super::{build_treemap, LayoutSize, Treemap};
 
 const PIXEL_SCROLL_THRESHOLD: f32 = 48.0;
 const MAX_CACHED_MAPS: usize = 8;
@@ -22,6 +21,7 @@ enum ZoomDirection {
 }
 
 pub(crate) struct TreemapViewport {
+    size: LayoutSize,
     root: NodeId,
     map: Arc<Treemap>,
     cache: HashMap<NodeId, Arc<Treemap>>,
@@ -34,6 +34,7 @@ impl TreemapViewport {
         let mut cache = HashMap::new();
         cache.insert(NodeId::ROOT, root_map.clone());
         Self {
+            size: root_map.size,
             root: NodeId::ROOT,
             map: root_map,
             cache,
@@ -48,6 +49,25 @@ impl TreemapViewport {
 
     pub(crate) fn map(&self) -> Arc<Treemap> {
         self.map.clone()
+    }
+
+    pub(crate) fn resize(&mut self, size: LayoutSize) -> bool {
+        if size == self.size {
+            return false;
+        }
+        self.size = size;
+        self.cache.clear();
+        self.cache_order.clear();
+        true
+    }
+
+    pub(crate) fn accept_layout(&mut self, map: Arc<Treemap>) -> bool {
+        if map.size != self.size || map.root != self.root {
+            return false;
+        }
+        self.insert_cache(self.root, map.clone());
+        self.map = map;
+        true
     }
 
     pub(crate) fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
@@ -90,7 +110,7 @@ impl TreemapViewport {
         let map = if let Some(map) = self.cache.get(&target) {
             map.clone()
         } else {
-            let map = Arc::new(build_treemap(scan, target));
+            let map = Arc::new(build_treemap(scan, target, self.size));
             self.insert_cache(target, map.clone());
             map
         };
@@ -131,6 +151,11 @@ impl TreemapViewport {
     }
 
     fn insert_cache(&mut self, id: NodeId, map: Arc<Treemap>) {
+        if let Some(cached) = self.cache.get_mut(&id) {
+            *cached = map;
+            self.touch_cache(id);
+            return;
+        }
         while self.cache.len() >= MAX_CACHED_MAPS {
             let Some(position) = self
                 .cache_order
@@ -189,10 +214,9 @@ fn next_directory_toward(
 
 #[cfg(test)]
 mod tests {
-    use super::build_treemap;
+    use super::{build_treemap, LayoutSize};
     use super::{ScrollAmount, TreemapViewport, ZoomDirection};
-    use akimi_ext4::FilesystemScan;
-    use akimi_model::{NameArena, Node, NodeArena, NodeId, NodeKind, ScanResult};
+    use akimi_model::{FilesystemScan, NameArena, Node, NodeArena, NodeId, NodeKind, ScanResult};
     use std::sync::Arc;
 
     fn nested_scan() -> FilesystemScan {
@@ -244,7 +268,7 @@ mod tests {
     #[test]
     fn zooms_one_directory_level_toward_the_item_under_the_pointer() {
         let scan = nested_scan();
-        let map = Arc::new(build_treemap(&scan, NodeId::ROOT));
+        let map = Arc::new(build_treemap(&scan, NodeId::ROOT, LayoutSize::default()));
         let mut viewport = TreemapViewport::new(map);
         let (x, y) = center_of(&viewport, NodeId(3));
 
@@ -257,7 +281,7 @@ mod tests {
     #[test]
     fn zooming_out_moves_to_one_parent_at_a_time() {
         let scan = nested_scan();
-        let map = Arc::new(build_treemap(&scan, NodeId::ROOT));
+        let map = Arc::new(build_treemap(&scan, NodeId::ROOT, LayoutSize::default()));
         let mut viewport = TreemapViewport::new(map);
         assert_eq!(viewport.zoom_to(&scan, NodeId(2)), Some(NodeId(2)));
 
@@ -269,7 +293,7 @@ mod tests {
     #[test]
     fn precise_scroll_accumulates_before_zooming() {
         let scan = nested_scan();
-        let map = Arc::new(build_treemap(&scan, NodeId::ROOT));
+        let map = Arc::new(build_treemap(&scan, NodeId::ROOT, LayoutSize::default()));
         let mut viewport = TreemapViewport::new(map);
         let (x, y) = center_of(&viewport, NodeId(3));
 
@@ -286,7 +310,7 @@ mod tests {
     #[test]
     fn reversing_scroll_discards_the_old_partial_gesture() {
         let scan = nested_scan();
-        let map = Arc::new(build_treemap(&scan, NodeId::ROOT));
+        let map = Arc::new(build_treemap(&scan, NodeId::ROOT, LayoutSize::default()));
         let mut viewport = TreemapViewport::new(map);
         viewport.scroll_accumulator = 0.75;
 
@@ -296,5 +320,30 @@ mod tests {
             viewport.consume_scroll(ScrollAmount::Lines(-1.0)),
             Some(ZoomDirection::Out)
         );
+    }
+
+    #[test]
+    fn resizing_invalidates_zoom_cache_and_rejects_stale_layouts() {
+        let scan = nested_scan();
+        let old = LayoutSize::default();
+        let square = LayoutSize::new(1000.0, 1000.0).unwrap();
+        let map = Arc::new(build_treemap(&scan, NodeId::ROOT, old));
+        let mut viewport = TreemapViewport::new(map.clone());
+        viewport.zoom_to(&scan, NodeId(1));
+        viewport.reset(&scan);
+        assert!(viewport.resize(square));
+        assert!(!viewport.resize(square));
+        assert!(!viewport.accept_layout(map));
+
+        let resized = Arc::new(build_treemap(&scan, NodeId::ROOT, square));
+        assert!(viewport.accept_layout(resized.clone()));
+        assert!(Arc::ptr_eq(&viewport.map(), &resized));
+        viewport.zoom_to(&scan, NodeId(1));
+        assert_eq!(viewport.map().size, square);
+        assert!(!viewport.accept_layout(resized));
+        viewport.reset(&scan);
+        assert_eq!(viewport.map().size, square);
+        let (x, y) = center_of(&viewport, NodeId(3));
+        assert_eq!(viewport.hit_test(x, y), Some(NodeId(3)));
     }
 }
