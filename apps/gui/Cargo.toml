@@ -9,7 +9,6 @@ name = "akimi-gui"
 path = "src/main.rs"
 
 [dependencies]
-akimi-ext4 = { path = "../../crates/ext4" }
 akimi-filesystem = { path = "../../crates/filesystem" }
 akimi-model = { path = "../../crates/model" }
 gpui-kit.workspace = true

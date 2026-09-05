@@ -5,7 +5,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use akimi_ext4::{FilesystemInfo, FilesystemScan, ScanStats, ScanTimings, ScanWarnings};
+use akimi_model::{FilesystemInfo, FilesystemScan, ScanStats, ScanTimings, ScanWarnings};
 use akimi_model::{NameArena, Node, NodeArena, NodeId, NodeKind, ScanResult};
 use thiserror::Error;
 
@@ -182,7 +182,11 @@ fn scan_inner(
                 name,
                 kind: meta.kind,
                 logical_size: meta.logical_size,
-                allocated_size: owns_allocation.then_some(meta.allocated_size).unwrap_or(0),
+                allocated_size: if owns_allocation {
+                    meta.allocated_size
+                } else {
+                    0
+                },
                 links: meta.links,
                 mtime: meta.mtime,
             });

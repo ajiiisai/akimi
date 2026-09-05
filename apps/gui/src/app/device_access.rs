@@ -5,8 +5,8 @@ use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::process::Command;
 
-use akimi_ext4::FilesystemScan;
 use akimi_filesystem::Filesystem;
+use akimi_model::FilesystemScan;
 use zbus::blocking::{Connection, Proxy};
 use zbus::zvariant::{OwnedFd, OwnedObjectPath, Value};
 

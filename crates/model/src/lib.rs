@@ -2,11 +2,13 @@ mod aggregate;
 mod arena;
 mod node;
 mod rank;
+mod scan;
 
 pub use aggregate::{aggregate, AggregateError, Totals};
 pub use arena::{ArenaError, NameArena, NodeArena};
 pub use node::{NameRef, Node, NodeId, NodeKind};
 pub use rank::{rank_largest, RankFilter, RankedNode};
+pub use scan::{FilesystemInfo, FilesystemScan, ScanStats, ScanTimings, ScanWarnings};
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ScanResult {

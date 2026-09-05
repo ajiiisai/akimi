@@ -10,7 +10,6 @@ name = "akimi_ext4"
 
 [dependencies]
 akimi-model = { path = "../model" }
-serde.workspace = true
 thiserror.workspace = true
 
 [build-dependencies]

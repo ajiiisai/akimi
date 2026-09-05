@@ -5,7 +5,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use akimi_ext4::{FilesystemInfo, FilesystemScan, ScanStats, ScanTimings, ScanWarnings};
+use akimi_model::{FilesystemInfo, FilesystemScan, ScanStats, ScanTimings, ScanWarnings};
 use akimi_model::{NameArena, Node, NodeArena, NodeId, NodeKind, ScanResult};
 
 pub fn scan(
@@ -143,9 +143,11 @@ fn node_with_size(
         name,
         kind,
         logical_size: metadata.len(),
-        allocated_size: owns_allocation
-            .then_some(metadata.blocks() * 512)
-            .unwrap_or(0),
+        allocated_size: if owns_allocation {
+            metadata.blocks() * 512
+        } else {
+            0
+        },
         links: metadata.nlink() as u32,
         mtime: metadata.mtime(),
     }

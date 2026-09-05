@@ -5,7 +5,7 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use akimi_ext4::{FilesystemInfo, FilesystemScan};
+use akimi_model::{FilesystemInfo, FilesystemScan};
 use thiserror::Error;
 
 mod direct;

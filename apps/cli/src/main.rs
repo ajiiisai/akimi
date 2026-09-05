@@ -3,9 +3,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use akimi_ext4::{FilesystemInfo, FilesystemScan};
 use akimi_filesystem::{Filesystem, FilesystemError};
 use akimi_model::{rank_largest, NodeKind, RankFilter, RankedNode};
+use akimi_model::{FilesystemInfo, FilesystemScan};
 use anyhow::Result;
 use clap::Parser;
 use serde_json::json;

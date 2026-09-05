@@ -3,7 +3,8 @@ mod btrfs;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
-use akimi_ext4::{Ext4Error, Ext4Filesystem, FilesystemInfo, FilesystemScan};
+use akimi_ext4::{Ext4Error, Ext4Filesystem};
+use akimi_model::{FilesystemInfo, FilesystemScan};
 use thiserror::Error;
 
 pub use btrfs::BtrfsFilesystem;
