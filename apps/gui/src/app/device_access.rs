@@ -115,7 +115,7 @@ fn describe_authorization_error(error: zbus::Error) -> String {
             return "Read access was cancelled. The volume was not scanned.".into();
         }
         if name.contains(".NotAuthorized") || name.ends_with(".AccessDenied") {
-            return "Read access was not authorized. If no password dialog appeared, start your desktop's polkit authentication agent.".into();
+            return "Read access was not authorized. Polkit needs a graphical authentication agent, which niri does not start by itself. Start polkit-gnome-authentication-agent-1, lxqt-policykit-agent, or another polkit agent, then retry.".into();
         }
     }
     describe_udisks_error("Could not obtain read-only access", error)
